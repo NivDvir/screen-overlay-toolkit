@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+.swiftpm/
+GroundingKit.app/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+__pycache__/
+*.pyc
+/tmp/gk_*
