@@ -115,33 +115,44 @@ If `#222` gets merged upstream, `Package.swift` will be repointed to `ml-explore
 
 ## File layout
 
+Organized by **feature**, not by layer. Each folder under `Sources/GroundingKit/Features/` is self-contained — copy just that folder into another project to reuse the capability.
+
 ```
 GroundingKit-axvs-clone/
-├── build-app.sh              # Build the .app bundle
-├── Package.swift             # SPM dependencies (points at NivDvir/mlx-swift-lm fork)
-├── Info.plist                # Bundle metadata template
-├── BUILD_NOTES.md            # Notes on the mlx-swift-lm fork dependency
+├── README.md                 # this file
+├── BUILD_NOTES.md            # mlx-swift-lm fork dependency notes
+├── Package.swift             # SPM config (points at NivDvir/mlx-swift-lm fork)
+├── Info.plist                # .app bundle metadata template
+├── build-app.sh              # builds GroundingKit.app
 ├── Sources/
-│   ├── main.swift            # Entry + main 7-cycle loop (VLM / OCR / Claude)
-│   ├── NativePanelDetector.swift   # Qwen2.5-VL grounding (native Swift MLX)
-│   ├── DeepScan.swift        # Apple Vision OCR per panel
-│   ├── ScrollAccumulator.swift     # Fuzzy-match text stitching across scrolls
-│   ├── ScrollSignal.swift    # Detect when more content is below the fold
-│   ├── HScrollSignal.swift   # Horizontal-scroll detection
-│   ├── OverlayController.swift     # Guide rendering on a borderless window
-│   ├── ContentState.swift    # Shared state (question, editor, solution, phase)
-│   ├── PlatformConfig.swift  # Site-specific config hooks (Generic by default)
-│   ├── ChromeCapture.swift   # Find + clamp to Chrome window bounds
-│   ├── ScreenCapture.swift   # Full-screen CGWindowList capture
-│   ├── GhostLayout.swift     # Ghost-text positioning in editor
-│   ├── LLMAnalyzer.swift     # Python VLM subprocess path (fallback / alt)
-│   ├── GeminiClient.swift    # Optional LLM-via-API solution generator
-│   ├── ClaudeMCQ.swift       # Claude-CLI-based solution generator
-│   ├── MockSolutions.swift   # Solution types + optional local registry (empty by default)
-│   └── … (support files)
-└── Python/
-    └── panel_detector*.py    # Python reference / optional subprocess path
+│   ├── GroundingKit/Features/       # ← library code, feature-organized
+│   │   ├── WindowCapture/           # find + capture browser windows (+ README)
+│   │   ├── PanelDetection/          # Qwen2.5-VL grounding (+ README)
+│   │   ├── OCRScrollAccumulator/    # Vision OCR + scroll-stitching (+ README)
+│   │   ├── GuidanceOverlay/         # draw markers on screen (+ README)
+│   │   ├── SolutionGenerators/      # Claude CLI, Gemini wrappers (+ README)
+│   │   ├── ChangeDetection/         # pixel-diff change detection (+ README)
+│   │   └── Engine/                  # orchestrator + shared state (+ README)
+│   └── GroundingKitApp/             # the shipped macOS app = reference consumer
+│       ├── main.swift
+│       └── AppDelegate.swift
+├── Samples/                         # standalone seed code per feature
+│   ├── MinimalPanelDetection.swift
+│   ├── ScrollReader.swift
+│   ├── ScreenAnnotator.swift
+│   └── DiffWatcher.swift
+├── Python/                          # optional Python backends (panel_detector*.py)
+└── patches/                         # MROPE patch (backup — fork already applies it)
 ```
+
+Each `Sources/GroundingKit/Features/<Name>/README.md` documents:
+
+- what the feature does
+- standalone usage code
+- exact cross-feature dependencies
+- public API surface
+
+The `Samples/*.swift` files are copy-paste seeds for other projects — minimal real-world wirings using just one feature.
 
 ---
 

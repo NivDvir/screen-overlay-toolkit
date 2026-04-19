@@ -349,7 +349,7 @@ class ContentState {
                       questionSnapshot.count, isMultiAnswer ? "YES" : "NO")
 
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    let answer = ClaudeMCQ.solve(
+                    let answer = ClaudeSolver.solve(
                         question: questionSnapshot,
                         options: optionsSnapshot,
                         choiceHint: choiceHint
@@ -433,7 +433,7 @@ class ContentState {
 
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                         defer { self?.queue.sync { self?._claudeInFlight = false } }
-                        if let code = ClaudeMCQ.solveCoding(question: questionSnapshot, editorCode: editorSnapshot) {
+                        if let code = ClaudeSolver.solveCoding(question: questionSnapshot, editorCode: editorSnapshot) {
                             let solution = GeminiClient.parseCodeToSolution(code: code, questionText: questionSnapshot)
                             self?.setGeminiSolution(solution)
                         } else {

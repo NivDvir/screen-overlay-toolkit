@@ -20,7 +20,7 @@ struct PanelInfo {
     let firstLineY: CGFloat
 }
 
-class LLMAnalyzer {
+class PythonPanelDetector {
     private var serverProcess: Process?
     private var serverStdin: FileHandle?
     private var serverStdout: FileHandle?

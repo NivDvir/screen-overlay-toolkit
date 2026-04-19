@@ -50,7 +50,7 @@ struct DetectedLine {
 // MARK: - Deep Scanner
 
 @available(macOS 26.0, *)
-struct DeepScanner {
+struct OCRScanner {
 
     /// Platform-specific sidebar labels to filter from question panel OCR — set at startup
     static var sidebarLabels: [String] = ["editorial", "discussions", "submissions", "leaderboard", "problem"]
@@ -78,12 +78,12 @@ struct DeepScanner {
         let imgRect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         let safeCrop = pixelRect.intersection(imgRect)
         guard !safeCrop.isEmpty, safeCrop.width > 100, safeCrop.height > 100 else {
-            NSLog("DeepScan[%@]: crop too small", label)
+            NSLog("OCRScanner[%@]: crop too small", label)
             return nil
         }
 
         guard let cropped = image.cropping(to: safeCrop) else {
-            NSLog("DeepScan[%@]: crop failed", label)
+            NSLog("OCRScanner[%@]: crop failed", label)
             return nil
         }
 
@@ -128,11 +128,11 @@ struct DeepScanner {
         do {
             try vnHandler.perform([vnRequest])
         } catch {
-            NSLog("DeepScan[%@]: VNText failed: %@", label, error.localizedDescription)
+            NSLog("OCRScanner[%@]: VNText failed: %@", label, error.localizedDescription)
             return nil
         }
         guard let results = vnRequest.results, !results.isEmpty else {
-            NSLog("DeepScan[%@]: VNText no results", label)
+            NSLog("OCRScanner[%@]: VNText no results", label)
             return nil
         }
         let lines: [DetectedLine] = results.compactMap { obs in
@@ -213,7 +213,7 @@ struct DeepScanner {
         }
 
         let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000
-        NSLog("DeepScan[%@]: %d lines in %.0fms (lineHeight=%.1f)",
+        NSLog("OCRScanner[%@]: %d lines in %.0fms (lineHeight=%.1f)",
               label, sortedLines.count, ms, lineHeight)
 
         return PanelState(
@@ -240,7 +240,7 @@ struct DeepScanner {
         let allLines = (questionPanel?.lines ?? []) + (editorPanel?.lines ?? [])
         let ms = (CFAbsoluteTimeGetCurrent() - start) * 1000
 
-        NSLog("DeepScan: bounded scan %.0fms — Q:%d lines, E:%d lines",
+        NSLog("OCRScanner: bounded scan %.0fms — Q:%d lines, E:%d lines",
               ms, questionPanel?.lines.count ?? 0, editorPanel?.lines.count ?? 0)
 
         return ScanResult(
@@ -265,12 +265,12 @@ struct DeepScanner {
         do {
             observations = try await handler.perform(request)
         } catch {
-            NSLog("DeepScan: failed: %@", error.localizedDescription)
+            NSLog("OCRScanner: failed: %@", error.localizedDescription)
             return ScanResult(timestamp: start, durationMs: elapsed(start), questionPanel: nil, editorPanel: nil, allLines: [])
         }
 
         guard let doc = observations.first?.document else {
-            NSLog("DeepScan: no document")
+            NSLog("OCRScanner: no document")
             return ScanResult(timestamp: start, durationMs: elapsed(start), questionPanel: nil, editorPanel: nil, allLines: [])
         }
 
@@ -313,7 +313,7 @@ struct DeepScanner {
         let editorPanel = leftLabel == "EDITOR" ? leftPanel : rightPanel
 
         let ms = elapsed(start)
-        NSLog("DeepScan: full scan %.0fms — %@ (%d) | %@ (%d)",
+        NSLog("OCRScanner: full scan %.0fms — %@ (%d) | %@ (%d)",
               ms, leftLabel, leftLines.count, rightLabel, rightLines.count)
 
         return ScanResult(timestamp: start, durationMs: ms,

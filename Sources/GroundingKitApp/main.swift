@@ -56,8 +56,8 @@ if #available(macOS 26.0, *) {
     let platform = PlatformConfig.detect()
     NSLog("GroundingKit: Platform = %@ (editorDark=%@)", platform.name, platform.editorThemeIsDark ? "yes" : "no")
     ChromeCapture.windowKeywords = platform.browserWindowKeywords
-    DeepScanner.sidebarLabels = platform.sidebarLabels
-    DeepScanner.editorThemeIsDark = platform.editorThemeIsDark
+    OCRScanner.sidebarLabels = platform.sidebarLabels
+    OCRScanner.editorThemeIsDark = platform.editorThemeIsDark
     GhostLayout.uiKeywords = platform.uiKeywords
     GeminiClient.shared.promptIOHint = platform.promptIOHint
     state.templateClassPatterns = platform.templateClassPatterns
@@ -77,7 +77,7 @@ if #available(macOS 26.0, *) {
 
     // Initial deep scan for content only — no panel boxes (VLM handles those)
     Task {
-        let scan = await DeepScanner.scanFull(image: image)
+        let scan = await OCRScanner.scanFull(image: image)
         state.update(from: scan)
         await MainActor.run {
             overlay.setStatus("🔍 Deep scan done — waiting for VLM panels...")
@@ -270,12 +270,12 @@ if #available(macOS 26.0, *) {
 
             let scan: ScanResult
             if state.questionBounds != .zero && state.editorBounds != .zero {
-                scan = await DeepScanner.scanWithBounds(
+                scan = await OCRScanner.scanWithBounds(
                     image: capturedImg,
                     questionBounds: state.questionBounds,
                     editorBounds: state.editorBounds)
             } else {
-                scan = await DeepScanner.scanFull(image: capturedImg)
+                scan = await OCRScanner.scanFull(image: capturedImg)
             }
 
             // Update FULL state from scan (question text + editor lines + solution matching)

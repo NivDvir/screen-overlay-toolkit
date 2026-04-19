@@ -4,7 +4,7 @@ import Foundation
 /// First call opens the session with test context. Subsequent calls resume it.
 /// Uses Claude Max subscription — zero extra API cost.
 
-enum ClaudeMCQ {
+enum ClaudeSolver {
 
     /// Path to the Claude CLI. Resolves via PATH by default.
     /// Set `CLAUDE_CLI_PATH` env var to override (e.g. `/opt/homebrew/bin/claude` or `~/.local/bin/claude`).
