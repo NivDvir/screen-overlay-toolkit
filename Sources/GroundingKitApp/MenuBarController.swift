@@ -1,71 +1,67 @@
 import AppKit
 
-/// Minimal menu bar presence for GroundingKit.
+/// Menu bar presence for GroundingKit.
 ///
-/// Shows the current engine status next to a target icon in the system
-/// menu bar, with a dropdown menu exposing the most common user actions
-/// (view log, reveal artifacts in Finder, quit). The engine keeps running
-/// regardless — this is an observer + control surface, not the engine itself.
+/// Left-clicking the status item toggles a popover dashboard. The menu bar
+/// icon itself shows the latest engine status string so users get glance-able
+/// state without opening the popover. A right-click (or control-click) opens
+/// a context menu with advanced actions; day-to-day controls live inside the
+/// popover's footer bar instead.
 final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
-    private let statusMenuItem: NSMenuItem
-    private var latestDetail: String = "Starting..."
-
-    /// Set by `main.swift` — invoked when the user picks "Open Dashboard".
-    var onOpenDashboard: (() -> Void)?
+    private weak var popover: DashboardPopover?
 
     override init() {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        self.statusMenuItem = NSMenuItem(title: "Starting...", action: nil, keyEquivalent: "")
         super.init()
         configureButton()
-        configureMenu()
     }
 
-    /// Call with the latest status string from OverlayController.onStatusChanged.
+    func bind(popover: DashboardPopover) {
+        self.popover = popover
+    }
+
+    /// Called whenever engine status changes. Displayed next to the icon.
     func update(status: String) {
         let trimmed = status.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        latestDetail = trimmed
         DispatchQueue.main.async { [weak self] in
             self?.statusItem.button?.title = " \(trimmed)"
-            self?.statusMenuItem.title = trimmed
         }
     }
 
     private func configureButton() {
         guard let button = statusItem.button else { return }
-        if let icon = NSImage(systemSymbolName: "target", accessibilityDescription: "GroundingKit") {
+        if let icon = NSImage(systemSymbolName: "scope", accessibilityDescription: "GroundingKit") {
             icon.isTemplate = true
             button.image = icon
         }
         button.imagePosition = .imageLeft
         button.title = " GroundingKit"
+        button.target = self
+        button.action = #selector(handleClick(_:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    private func configureMenu() {
+    @objc private func handleClick(_ sender: Any?) {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || (event?.modifierFlags.contains(.control) ?? false) {
+            showContextMenu()
+        } else {
+            popover?.toggle(relativeTo: statusItem.button!)
+        }
+    }
+
+    private func showContextMenu() {
         let menu = NSMenu()
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
+        menu.addItem(withTitle: "Open Log", action: #selector(openLog), keyEquivalent: "l").target = self
+        menu.addItem(withTitle: "Reveal Artifacts in Finder", action: #selector(revealArtifacts), keyEquivalent: "r").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Open Dashboard…",
-                     action: #selector(openDashboard),
-                     keyEquivalent: "d").target = self
-        menu.addItem(withTitle: "Open Log (/tmp/ccsv_overlay.log)",
-                     action: #selector(openLog),
-                     keyEquivalent: "l").target = self
-        menu.addItem(withTitle: "Reveal Artifacts in Finder",
-                     action: #selector(revealArtifacts),
-                     keyEquivalent: "r").target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit GroundingKit",
-                     action: #selector(quit),
-                     keyEquivalent: "q").target = self
+        menu.addItem(withTitle: "Quit GroundingKit", action: #selector(quit), keyEquivalent: "q").target = self
+        // Attaching menu then popUpMenu lets it dismiss after selection.
         statusItem.menu = menu
-    }
-
-    @objc private func openDashboard() {
-        onOpenDashboard?()
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil  // detach so next left-click goes back to popover
     }
 
     @objc private func openLog() {

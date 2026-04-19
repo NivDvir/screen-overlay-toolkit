@@ -33,9 +33,55 @@ struct DashboardView: View {
                 }
                 .padding(18)
             }
+            Divider().opacity(0.5)
+            footer
         }
-        .frame(minWidth: 780, minHeight: 560)
+        .frame(width: 820, height: 620)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: Footer
+
+    private var footer: some View {
+        HStack(spacing: 12) {
+            footerButton(label: "Open Log", systemImage: "doc.text") { openLog() }
+            footerButton(label: "Reveal Artifacts", systemImage: "folder") { revealArtifacts() }
+            Spacer()
+            footerButton(label: "Quit", systemImage: "power") { NSApp.terminate(nil) }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+    }
+
+    private func footerButton(label: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(label, systemImage: systemImage)
+                .font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+    }
+
+    private func openLog() {
+        let url = URL(fileURLWithPath: "/tmp/ccsv_overlay.log")
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSSound.beep()
+        }
+    }
+
+    private func revealArtifacts() {
+        let candidates = [
+            "/tmp/ccsv_overlay_frame.png",
+            "/tmp/ccsv_solution_lines.txt",
+            "/tmp/ccsv_accumulated_text.txt",
+        ]
+        if let first = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            NSWorkspace.shared.selectFile(first, inFileViewerRootedAtPath: "/tmp")
+        } else {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: "/tmp")
+        }
     }
 
     // MARK: Header

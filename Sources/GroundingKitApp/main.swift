@@ -45,14 +45,13 @@ signal(SIGTERM) { _ in cleanupTempFiles(); exit(0) }
 
 let overlay = OverlayController()
 let menuBar = MenuBarController()
-let dashboard = DashboardWindowController(model: EngineModel.shared)
-menuBar.onOpenDashboard = { dashboard.present() }
+let dashboard = DashboardPopover(model: EngineModel.shared)
+menuBar.bind(popover: dashboard)
 overlay.onStatusChanged = { [weak menuBar] text in
     menuBar?.update(status: text)
     DispatchQueue.main.async { EngineModel.shared.statusLine = text }
 }
 overlay.setStatus("⏳ Starting...")
-dashboard.present()
 
 guard let image = captureScreen() else { exit(1) }
 
