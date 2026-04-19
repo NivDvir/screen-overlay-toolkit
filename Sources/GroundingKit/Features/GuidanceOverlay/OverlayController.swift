@@ -83,12 +83,17 @@ class OverlayController {
         viewModel.ghostClues = clues
     }
 
+    /// Called whenever status changes. Consumers (e.g. a menu bar UI) can observe.
+    var onStatusChanged: ((String) -> Void)?
+
     func setStatus(_ text: String) {
         viewModel.statusText = text
+        onStatusChanged?(text)
     }
 
     func setStatusSegments(_ segments: [StatusSegment]) {
         viewModel.statusSegments = segments
+        onStatusChanged?(segments.map { $0.text }.joined())
     }
 
     /// Export the overlay window content as a CGImage (ghost clues on dark background).

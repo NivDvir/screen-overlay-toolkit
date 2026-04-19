@@ -44,6 +44,8 @@ signal(SIGINT) { _ in cleanupTempFiles(); exit(0) }
 signal(SIGTERM) { _ in cleanupTempFiles(); exit(0) }
 
 let overlay = OverlayController()
+let menuBar = MenuBarController()
+overlay.onStatusChanged = { [weak menuBar] text in menuBar?.update(status: text) }
 overlay.setStatus("⏳ Starting...")
 
 guard let image = captureScreen() else { exit(1) }
