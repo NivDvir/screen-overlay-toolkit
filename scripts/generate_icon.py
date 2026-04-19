@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Generate GroundingKit AppIcon.icns.
 
-Renders a scope/target mark on a dark rounded-square tile at 1024x1024,
+Renders an architectural-blueprint scope mark on a pale cool-white tile,
 then downsamples via sips and packages via iconutil.
 
 Design:
-  * Squircle tile, deep slate gradient (top-left darker, bottom-right near black)
-  * Concentric target rings in cool teal, with crosshair tick marks
-  * A single solid accent dot in the center (active grounding point)
-  * Generous inset so the mark stays readable at 16pt
+  * Squircle tile, very pale cool-white → light steel-blue vertical gradient
+  * Faint blueprint grid in the background for the "architectural" feel
+  * Concentric target rings in deep architectural navy, crisp edges
+  * Crosshair ticks in slate gray
+  * Single solid accent dot in architectural blue at the centre
+  * No glow, no glassmorphism — precise geometric forms, like a drafting plate
 
 Run from repo root:
   python3 scripts/generate_icon.py
@@ -19,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 SIZE = 1024
 REPO = Path(__file__).resolve().parent.parent
@@ -61,31 +63,51 @@ def vertical_gradient(size, top_color, bottom_color):
     return img
 
 
+# Architectural palette
+TILE_TOP    = (244, 247, 251)  # near-white cool
+TILE_BOTTOM = (216, 226, 240)  # pale steel-blue
+GRID        = (120, 145, 180)  # muted blueprint blue (faint)
+RING_DEEP   = (29,  74,  137)  # deep architectural navy
+RING_MED    = (82,  120, 170)  # mid architectural blue
+TICK        = (90, 108, 132)   # slate gray
+DOT         = (29,  74,  137)  # same deep navy as primary ring
+DOT_INNER   = (255, 255, 255)  # white bullseye inside the dot
+BORDER      = (152, 170, 198)  # soft blue-gray hairline
+
+
 def build_icon(size: int) -> Image.Image:
-    # Base gradient tile
-    top = (38, 46, 64)       # slate-teal
-    bot = (14, 18, 28)       # near-black
-    tile = vertical_gradient(size, top, bot)
+    tile = vertical_gradient(size, TILE_TOP, TILE_BOTTOM).convert("RGBA")
 
-    # Subtle top-left highlight
-    highlight = Image.new("RGB", (size, size), (0, 0, 0))
-    hd = ImageDraw.Draw(highlight)
-    for i in range(size // 2):
-        alpha = int(70 * (1 - i / (size / 2)))
-        hd.ellipse(
-            (-size // 2 + i, -size // 2 + i, size // 2 + i, size // 2 + i),
-            outline=(alpha, alpha, alpha),
-        )
-    tile = Image.blend(tile, highlight, 0.18)
+    # Blueprint grid — very faint, only visible on large renders.
+    grid = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(grid)
+    step = max(8, size // 16)
+    alpha = 18  # very subtle
+    for x in range(step, size, step):
+        gd.line([(x, 0), (x, size)], fill=(*GRID, alpha), width=1)
+    for y in range(step, size, step):
+        gd.line([(0, y), (size, y)], fill=(*GRID, alpha), width=1)
+    tile = Image.alpha_composite(tile, grid)
 
-    # Mask to a squircle (macOS-style rounded square)
+    # Scope mark on top
+    tile.alpha_composite(draw_scope(size))
+
+    # Squircle mask + hairline border for a crisp architectural plate feel
     radius = int(size * 0.22)
     mask = rounded_rect_mask(size, radius)
     tile.putalpha(mask)
 
-    # Overlay the scope mark
-    mark = draw_scope(size)
-    tile.alpha_composite(mark)
+    # Draw a 1–2px border inside the squircle
+    border_layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    bd = ImageDraw.Draw(border_layer)
+    border_width = max(1, size // 256)
+    bd.rounded_rectangle(
+        (border_width, border_width, size - 1 - border_width, size - 1 - border_width),
+        radius=radius - border_width,
+        outline=(*BORDER, 200),
+        width=border_width,
+    )
+    tile.alpha_composite(border_layer)
 
     return tile
 
@@ -95,39 +117,48 @@ def draw_scope(size: int) -> Image.Image:
     d = ImageDraw.Draw(layer)
 
     cx = cy = size // 2
-    outer_r = int(size * 0.33)
+    outer_r = int(size * 0.32)
 
-    teal = (94, 210, 207, 255)   # cool teal
-    teal_soft = (94, 210, 207, 160)
-    accent = (255, 220, 120, 255)  # warm accent dot
+    # Ring stroke widths — held consistent for crisp line-drawing feel.
+    w_outer = max(3, size // 72)
+    w_mid   = max(2, size // 110)
+    w_inner = max(2, size // 150)
 
-    # three concentric rings, thinning inward
-    ring_widths = [max(2, size // 90), max(2, size // 128), max(1, size // 180)]
-    for i, (scale, w) in enumerate(zip([1.0, 0.68, 0.38], ring_widths)):
-        r = int(outer_r * scale)
-        d.ellipse(
-            (cx - r, cy - r, cx + r, cy + r),
-            outline=teal if i < 2 else teal_soft,
-            width=w,
-        )
+    # Outer ring (deep navy, strongest)
+    _ring(d, cx, cy, outer_r, RING_DEEP, w_outer)
+    # Mid ring (medium blue, thinner)
+    _ring(d, cx, cy, int(outer_r * 0.66), RING_MED, w_mid)
+    # Inner ring (same navy as outer but very thin — adds depth)
+    _ring(d, cx, cy, int(outer_r * 0.36), RING_DEEP, w_inner)
 
-    # crosshair tick marks (four short radial ticks)
-    tick_len = int(outer_r * 0.22)
-    tick_w = max(2, size // 140)
+    # Crosshair ticks — four radial marks, slate gray
+    tick_len = int(outer_r * 0.26)
+    tick_gap = int(outer_r * 0.04)  # small gap between ring edge and tick
+    tick_w = max(2, size // 120)
     for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-        x0 = cx + int(outer_r * 1.02 * dx)
-        y0 = cy + int(outer_r * 1.02 * dy)
+        x0 = cx + int((outer_r + tick_gap) * dx)
+        y0 = cy + int((outer_r + tick_gap) * dy)
         x1 = x0 + tick_len * dx
         y1 = y0 + tick_len * dy
-        d.line([(x0, y0), (x1, y1)], fill=teal, width=tick_w)
+        d.line([(x0, y0), (x1, y1)], fill=TICK, width=tick_w)
 
-    # center accent dot
-    dot_r = max(3, int(size * 0.035))
-    d.ellipse((cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r), fill=accent)
+    # Fine crosshair crossing through the centre (very thin)
+    cross_w = max(1, size // 256)
+    cross_len = int(outer_r * 0.55)
+    d.line([(cx - cross_len, cy), (cx + cross_len, cy)], fill=(*TICK, 120), width=cross_w)
+    d.line([(cx, cy - cross_len), (cx, cy + cross_len)], fill=(*TICK, 120), width=cross_w)
 
-    # soft glow on the dot (composite on top of itself, blurred)
-    glow = layer.filter(ImageFilter.GaussianBlur(radius=size / 60))
-    return Image.alpha_composite(glow, layer)
+    # Centre dot: navy fill + small white bullseye inside
+    dot_r = max(4, int(size * 0.045))
+    d.ellipse((cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r), fill=DOT)
+    inner_r = max(1, dot_r // 3)
+    d.ellipse((cx - inner_r, cy - inner_r, cx + inner_r, cy + inner_r), fill=DOT_INNER)
+
+    return layer
+
+
+def _ring(draw: ImageDraw.ImageDraw, cx: int, cy: int, r: int, color, width: int):
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=color, width=width)
 
 
 def main():
