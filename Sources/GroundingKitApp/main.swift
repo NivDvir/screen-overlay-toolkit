@@ -45,8 +45,14 @@ signal(SIGTERM) { _ in cleanupTempFiles(); exit(0) }
 
 let overlay = OverlayController()
 let menuBar = MenuBarController()
-overlay.onStatusChanged = { [weak menuBar] text in menuBar?.update(status: text) }
+let dashboard = DashboardWindowController(model: EngineModel.shared)
+menuBar.onOpenDashboard = { dashboard.present() }
+overlay.onStatusChanged = { [weak menuBar] text in
+    menuBar?.update(status: text)
+    DispatchQueue.main.async { EngineModel.shared.statusLine = text }
+}
 overlay.setStatus("⏳ Starting...")
+dashboard.present()
 
 guard let image = captureScreen() else { exit(1) }
 
@@ -64,16 +70,26 @@ if #available(macOS 26.0, *) {
     GeminiClient.shared.promptIOHint = platform.promptIOHint
     state.templateClassPatterns = platform.templateClassPatterns
     overlay.setStatus("Platform: \(platform.name)")
+    DispatchQueue.main.async { EngineModel.shared.platformName = platform.name }
 
     // Load VLM in background — doesn't block
     Task.detached {
-        await MainActor.run { overlay.setStatus("Loading VLM model...") }
+        await MainActor.run {
+            overlay.setStatus("Loading VLM model...")
+            EngineModel.shared.vlmState = .loading
+        }
         do {
             try await detector.loadModel()
-            await MainActor.run { overlay.setStatus("✅ VLM loaded — detecting...") }
+            await MainActor.run {
+                overlay.setStatus("✅ VLM loaded — detecting...")
+                EngineModel.shared.vlmState = .ready
+            }
         } catch {
             NSLog("NativeVLM: LOAD ERROR: %@", "\(error)")
-            await MainActor.run { overlay.setStatus("❌ VLM: \(error.localizedDescription)") }
+            await MainActor.run {
+                overlay.setStatus("❌ VLM: \(error.localizedDescription)")
+                EngineModel.shared.vlmState = .error(error.localizedDescription)
+            }
         }
     }
 
@@ -124,11 +140,22 @@ if #available(macOS 26.0, *) {
     }
 
     Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+        // Dashboard Start/Stop toggle — when stopped, skip all scan work.
+        guard EngineModel.shared.isRunning else {
+            overlay.setStatus("⏸ Paused")
+            return
+        }
         guard !scanInProgress else { return }
         scanInProgress = true
         cycleCount += 1
         let cycleInRound = ((cycleCount - 1) % 7) + 1  // 1-7
         if cycleInRound == 1 { roundCount += 1 }
+        let rndPublish = roundCount
+        let cycPublish = cycleInRound
+        DispatchQueue.main.async {
+            EngineModel.shared.round = rndPublish
+            EngineModel.shared.cycleInRound = cycPublish
+        }
 
         Task {
             defer { scanInProgress = false }
@@ -162,7 +189,10 @@ if #available(macOS 26.0, *) {
                 vlmRunning = true
                 let vlmImage = capturedImg
                 let rnd = roundCount
-                await MainActor.run { setStatusSegments(round: rnd, isVLM: true, detail: "processing...") }
+                await MainActor.run {
+                    setStatusSegments(round: rnd, isVLM: true, detail: "processing...")
+                    EngineModel.shared.vlmState = .inferring
+                }
 
                 Task.detached {
                     if let analysis = await detector.detectPanels(from: vlmImage) {
@@ -231,10 +261,14 @@ if #available(macOS 26.0, *) {
                                                         width: state.editorBounds.width, height: state.editorBounds.height,
                                                         label: "EDITOR", paragraphCount: 0), color: "green", label: "EDITOR")
                             setStatusSegments(round: rnd, isVLM: true, detail: "done ✓")
+                            EngineModel.shared.vlmState = .ready
+                            EngineModel.shared.questionBounds = state.questionBounds
+                            EngineModel.shared.editorBounds = state.editorBounds
                         }
                     } else {
                         await MainActor.run {
                             setStatusSegments(round: rnd, isVLM: true, detail: "failed ✗")
+                            EngineModel.shared.vlmState = .ready
                         }
                     }
                     vlmRunning = false
@@ -282,6 +316,30 @@ if #available(macOS 26.0, *) {
 
             // Update FULL state from scan (question text + editor lines + solution matching)
             state.update(from: scan)
+
+            // Publish OCR + solver state into dashboard model
+            let qText = state.questionText
+            let accChars = qText.count
+            let accLines = qText.isEmpty ? 0 : qText.split(separator: "\n").count
+            let eLines = state.editorLines.count
+            let scrollDown = state.questionScrollSignal.needsScrollDown
+            let solverReady = state.solution
+            let claudePending = state.claudeInFlight
+            await MainActor.run {
+                EngineModel.shared.accumulatedLines = accLines
+                EngineModel.shared.accumulatedChars = accChars
+                EngineModel.shared.questionText = qText
+                EngineModel.shared.editorLineCount = eLines
+                EngineModel.shared.scrollDownNeeded = scrollDown
+                if let sol = solverReady {
+                    EngineModel.shared.solverState = .ready(lineCount: sol.lines.count, source: sol.problemId)
+                    EngineModel.shared.solutionCode = sol.lines.map(\.text).joined(separator: "\n")
+                } else if claudePending {
+                    EngineModel.shared.solverState = .waiting
+                } else {
+                    EngineModel.shared.solverState = .idle
+                }
+            }
 
             // Auto-scroll: if question panel needs scrolling and no solution yet,
             // inject a CGEvent scroll to reveal more text for the accumulator.

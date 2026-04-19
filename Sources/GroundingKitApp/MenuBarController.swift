@@ -11,6 +11,9 @@ final class MenuBarController: NSObject {
     private let statusMenuItem: NSMenuItem
     private var latestDetail: String = "Starting..."
 
+    /// Set by `main.swift` — invoked when the user picks "Open Dashboard".
+    var onOpenDashboard: (() -> Void)?
+
     override init() {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.statusMenuItem = NSMenuItem(title: "Starting...", action: nil, keyEquivalent: "")
@@ -45,6 +48,9 @@ final class MenuBarController: NSObject {
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Open Dashboard…",
+                     action: #selector(openDashboard),
+                     keyEquivalent: "d").target = self
         menu.addItem(withTitle: "Open Log (/tmp/ccsv_overlay.log)",
                      action: #selector(openLog),
                      keyEquivalent: "l").target = self
@@ -56,6 +62,10 @@ final class MenuBarController: NSObject {
                      action: #selector(quit),
                      keyEquivalent: "q").target = self
         statusItem.menu = menu
+    }
+
+    @objc private func openDashboard() {
+        onOpenDashboard?()
     }
 
     @objc private func openLog() {
