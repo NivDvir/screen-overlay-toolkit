@@ -46,11 +46,38 @@ struct DashboardView: View {
         HStack(spacing: 12) {
             footerButton(label: "Open Log", systemImage: "doc.text") { openLog() }
             footerButton(label: "Reveal Artifacts", systemImage: "folder") { revealArtifacts() }
+            footerButton(label: "About", systemImage: "info.circle") { showAbout() }
             Spacer()
             footerButton(label: "Quit", systemImage: "power") { NSApp.terminate(nil) }
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
+    }
+
+    private func showAbout() {
+        let body = """
+        GroundingKit — a real-time on-screen guidance engine.
+        Native Swift + MLX on Apple Silicon.
+
+        • Qwen2.5-VL-7B-Instruct-4bit (Alibaba) for panel grounding
+        • Apple Vision for OCR
+        • mlx-swift-lm (ml-explore + NivDvir fork) for Swift inference
+
+        github.com/NivDvir/screen-overlay-toolkit
+        """
+        let credits = NSAttributedString(
+            string: body,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        )
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "GroundingKit",
+            .applicationVersion: "1.0.0",
+            .credits: credits,
+        ])
     }
 
     private func footerButton(label: String, systemImage: String, action: @escaping () -> Void) -> some View {

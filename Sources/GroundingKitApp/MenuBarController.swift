@@ -54,6 +54,8 @@ final class MenuBarController: NSObject {
 
     private func showContextMenu() {
         let menu = NSMenu()
+        menu.addItem(withTitle: "About GroundingKit", action: #selector(showAbout), keyEquivalent: "").target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Open Log", action: #selector(openLog), keyEquivalent: "l").target = self
         menu.addItem(withTitle: "Reveal Artifacts in Finder", action: #selector(revealArtifacts), keyEquivalent: "r").target = self
         menu.addItem(.separator())
@@ -62,6 +64,33 @@ final class MenuBarController: NSObject {
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil  // detach so next left-click goes back to popover
+    }
+
+    @objc private func showAbout() {
+        let credits = NSMutableAttributedString(string: "")
+        let body = """
+        GroundingKit — a real-time on-screen guidance engine.
+        Native Swift + MLX on Apple Silicon.
+
+        • Qwen2.5-VL-7B-Instruct-4bit (Alibaba) for panel grounding
+        • Apple Vision for OCR
+        • mlx-swift-lm (ml-explore + NivDvir fork) for Swift inference
+
+        github.com/NivDvir/screen-overlay-toolkit
+        """
+        credits.append(NSAttributedString(
+            string: body,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        ))
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationName: "GroundingKit",
+            .applicationVersion: "1.0.0",
+            .credits: credits,
+        ])
     }
 
     @objc private func openLog() {

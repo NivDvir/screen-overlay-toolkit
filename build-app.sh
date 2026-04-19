@@ -82,6 +82,12 @@ for bundle in "$BUILD_DIR"/*.bundle; do
     fi
 done
 
+# App icon — regenerate via scripts/generate_icon.py if you change the art
+if [ -f "$SCRIPT_DIR/AppIcon.icns" ]; then
+    cp "$SCRIPT_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    echo "  Copied AppIcon.icns"
+fi
+
 # Info.plist — matches AXVS structure for TCC and rendering consistency
 cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -97,17 +103,25 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleDisplayName</key>
     <string>GroundingKit</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>1.0.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>1.0.0</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>MIT license — © 2026 Niv Dvir. Uses Qwen2.5-VL (Alibaba), MLX (Apple), mlx-swift-lm (ml-explore).</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppSleepDisabled</key>
