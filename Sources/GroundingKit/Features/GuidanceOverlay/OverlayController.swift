@@ -277,50 +277,69 @@ struct OverlayView: View {
                     .position(x: qb.midX, y: qb.midY)
                 }
 
-                // Reader-mode soft halo — a whisper of navy behind the detected content
-                // that marks the region without imposing a hard rectangular frame.
-                // Appears as soon as the content anchor is known (before the summary
-                // arrives) so the visual grounding is live during the OCR / summarise
-                // phase as well.
-                if viewModel.summaryAnchor != .zero {
+                // Reader-mode: draw 4 sharp perspective lines connecting the summary
+                // card's corners to the content region's corners — a visual frustum
+                // that grounds "this small summary refers to that larger section".
+                // Plus a hairline content outline for reference.
+                if !viewModel.summaryBullets.isEmpty && viewModel.summaryAnchor != .zero {
                     let anchor = viewModel.summaryAnchor
 
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(
-                            RadialGradient(
-                                colors: [
-                                    Self.accentNavy.opacity(0.09),
-                                    Self.accentNavy.opacity(0.035),
-                                    Color.clear,
-                                ],
-                                center: .center,
-                                startRadius: min(anchor.width, anchor.height) * 0.15,
-                                endRadius: min(anchor.width, anchor.height) * 0.78
-                            )
-                        )
-                        .frame(width: anchor.width + 32, height: anchor.height + 32)
-                        .position(x: anchor.midX, y: anchor.midY)
-                        .allowsHitTesting(false)
+                    // Card geometry — same as the rendered card below
+                    let cardWidth: CGFloat = 360
+                    let cardHeight: CGFloat = estimatedCardHeight(for: viewModel.summaryBullets)
+                    let rightEdge = min(anchor.maxX - 18, screenW - 18)
+                    let cardCenterX = rightEdge - cardWidth / 2
+                    let cardCenterY = anchor.minY + 230
+                    let cardRect = CGRect(
+                        x: cardCenterX - cardWidth / 2,
+                        y: cardCenterY - cardHeight / 2,
+                        width: cardWidth,
+                        height: cardHeight
+                    )
 
-                    // Hairline outline — drop it to 8% opacity; closer to a whisper
-                    // than a frame. Gone entirely at smaller resolutions.
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(Self.accentNavy.opacity(0.10), lineWidth: 0.8)
+                    // Four corner-to-corner lines
+                    Path { p in
+                        p.move(to: CGPoint(x: anchor.minX, y: anchor.minY)); p.addLine(to: CGPoint(x: cardRect.minX, y: cardRect.minY))
+                        p.move(to: CGPoint(x: anchor.maxX, y: anchor.minY)); p.addLine(to: CGPoint(x: cardRect.maxX, y: cardRect.minY))
+                        p.move(to: CGPoint(x: anchor.minX, y: anchor.maxY)); p.addLine(to: CGPoint(x: cardRect.minX, y: cardRect.maxY))
+                        p.move(to: CGPoint(x: anchor.maxX, y: anchor.maxY)); p.addLine(to: CGPoint(x: cardRect.maxX, y: cardRect.maxY))
+                    }
+                    .stroke(
+                        LinearGradient(
+                            colors: [Self.accentNavy.opacity(0.60), Self.accentNavy.opacity(0.18)],
+                            startPoint: .topLeading, endPoint: .bottomTrailing
+                        ),
+                        style: StrokeStyle(lineWidth: 1.0, lineCap: .round)
+                    )
+                    .allowsHitTesting(false)
+
+                    // Corner dots at the 4 anchor corners to mark the endpoints
+                    ForEach(0..<4, id: \.self) { i in
+                        let p: CGPoint = {
+                            switch i {
+                            case 0: return CGPoint(x: anchor.minX, y: anchor.minY)
+                            case 1: return CGPoint(x: anchor.maxX, y: anchor.minY)
+                            case 2: return CGPoint(x: anchor.minX, y: anchor.maxY)
+                            default: return CGPoint(x: anchor.maxX, y: anchor.maxY)
+                            }
+                        }()
+                        Circle()
+                            .fill(Self.accentNavy.opacity(0.70))
+                            .frame(width: 5, height: 5)
+                            .position(p)
+                            .allowsHitTesting(false)
+                    }
+
+                    // Hairline around the anchor region — 14% opacity, for reference only
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Self.accentNavy.opacity(0.14), lineWidth: 0.8)
                         .frame(width: anchor.width, height: anchor.height)
                         .position(x: anchor.midX, y: anchor.midY)
                         .allowsHitTesting(false)
-                }
 
-                // Summary card — shows only once bullets have actually arrived.
-                if !viewModel.summaryBullets.isEmpty && viewModel.summaryAnchor != .zero {
-                    let anchor = viewModel.summaryAnchor
-                    let cardWidth: CGFloat = 360
-                    let cardHSide: CGFloat = cardWidth / 2
-                    let rightEdge = min(anchor.maxX - 18, screenW - 18)
-                    let cardX = rightEdge - cardHSide
-                    let cardY = anchor.minY + 230
+                    // The summary card itself
                     summaryCard(bullets: viewModel.summaryBullets, width: cardWidth)
-                        .position(x: cardX, y: cardY)
+                        .position(x: cardCenterX, y: cardCenterY)
                         .transition(.asymmetric(
                             insertion: .move(edge: .trailing).combined(with: .opacity),
                             removal: .opacity
@@ -379,6 +398,18 @@ struct OverlayView: View {
         case "red":    return .red
         default:       return .white
         }
+    }
+
+    /// Estimated render height of the summary card — used for drawing the
+    /// perspective corner-lines BEFORE the card lays out on screen.
+    /// Matches the padding / spacing / bullet geometry of `summaryCard(bullets:width:)`.
+    func estimatedCardHeight(for bullets: [String]) -> CGFloat {
+        let headerRow: CGFloat = 22
+        let divider: CGFloat = 13
+        let bulletRow: CGFloat = 34  // 12pt font + 2 lineSpacing + wrap, averaged
+        let footer: CGFloat = 18
+        let paddingVertical: CGFloat = 28
+        return headerRow + divider + CGFloat(bullets.count) * bulletRow + footer + paddingVertical
     }
 
     /// Architectural palette (matches the AppIcon): deep navy + warm accent + slate.
