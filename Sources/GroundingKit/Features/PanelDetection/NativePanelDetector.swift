@@ -38,18 +38,28 @@ public class NativePanelDetector {
 
     public init() {}
 
+    /// Default model repo (mlx-community slug) when `GK_MODEL` env is unset.
+    /// Any model that shares Qwen2.5-VL's architecture (e.g. UI-TARS-1.5-7B) can
+    /// be swapped here — the MROPE patches in the pinned mlx-swift-lm fork apply
+    /// to the same Qwen25VL code path used by these derivatives.
+    private static let defaultModelRepo = "mlx-community/Qwen2.5-VL-7B-Instruct-4bit"
+
     public func loadModel() async throws {
         guard container == nil else { return }
 
-        let basePath = NSString(string: "~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-VL-7B-Instruct-4bit/snapshots").expandingTildeInPath
+        // Env override: set GK_MODEL to any mlx-community/... repo slug to swap models.
+        // Example: GK_MODEL=mlx-community/UI-TARS-1.5-7B-4bit
+        let repo = ProcessInfo.processInfo.environment["GK_MODEL"] ?? Self.defaultModelRepo
+        let repoSlug = repo.replacingOccurrences(of: "/", with: "--")
+        let basePath = NSString(string: "~/.cache/huggingface/hub/models--\(repoSlug)/snapshots").expandingTildeInPath
         let fm = FileManager.default
         guard let snapshots = try? fm.contentsOfDirectory(atPath: basePath),
               let snapshot = snapshots.first(where: { !$0.hasPrefix(".") }) else {
-            throw NSError(domain: "NativeVLM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model not found"])
+            throw NSError(domain: "NativeVLM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model not found at \(basePath) — check GK_MODEL env var"])
         }
         modelPath = "\(basePath)/\(snapshot)"
 
-        NSLog("NativeVLM: loading from %@", modelPath)
+        NSLog("NativeVLM: loading repo %@ from %@", repo, modelPath)
         let start = CFAbsoluteTimeGetCurrent()
         container = try await loadModelContainer(from: URL(fileURLWithPath: modelPath), using: LocalTokenizerLoader())
         NSLog("NativeVLM: loaded in %.0fms", (CFAbsoluteTimeGetCurrent() - start) * 1000)
@@ -238,12 +248,15 @@ public class NativePanelDetector {
         case .reader:
             // Broader framing: ask the VLM for a decomposition of the whole page
             // into 2–4 labeled regions, then pick the content one algorithmically.
-            // VLMs decompose reliably; they fight single-target extraction ("the
-            // reading column") because the label is semantic, not visual.
+            // Some Qwen-VL derivatives (notably UI-TARS, which is trained for click
+            // prediction) default to 2-element point output — we are explicit about
+            // wanting 4-element rectangles.
             prompt = """
             Decompose this webpage screenshot into its 2 to 4 main visual layout regions. Do not merge regions that are visually distinct (different background, clearly separated by whitespace, or different content type).
 
-            For each region, return a bounding box and a short semantic label picked from this set:
+            For each region, output a RECTANGLE bounding box as four pixel coordinates (not a click point): [x1, y1, x2, y2] where (x1, y1) is the top-left corner and (x2, y2) is the bottom-right corner. The array MUST contain exactly 4 numbers.
+
+            Pick a short semantic label for each region from this set:
               "content"     — the main reading column / article body / paper text (prose).
               "sidebar-left"— left-hand navigation, table of contents, tools rail.
               "sidebar-right"— right-hand settings, appearance, access-paper / related-links panel.
@@ -252,7 +265,7 @@ public class NativePanelDetector {
 
             Every visually distinct region gets its own entry. Do not omit a sidebar just because it is narrow.
 
-            Output a JSON array of 2–4 objects, each with exactly these keys:
+            Output a JSON array of 2–4 objects. Each object has exactly these keys:
             [{"label": "<label>", "bbox_2d": [x1, y1, x2, y2]}, ...]
             """
             requiredPanels = 1
