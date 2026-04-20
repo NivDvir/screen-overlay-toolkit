@@ -110,6 +110,13 @@ if #available(macOS 26.0, *) {
     // DIAGNOSTIC: set true to hide all overlay rendering (keeps window alive for capture exclusion test)
     let diagnosticHideOverlay = false
 
+    // Deterministic reader mode — env override for reliable demos.
+    // When set, skip VLM panel detection entirely and use the Chrome window as the
+    // content panel. The VLM still loads (for visual "panels detected" status) but
+    // its output is not used for bounds. Intended for recording demo GIFs against
+    // single-panel sites like Wikipedia/arXiv where VLM output varies between runs.
+    let forceReaderMode = ProcessInfo.processInfo.environment["GK_FORCE_READER"] == "1"
+
     var cycleCount = 0
     var roundCount = 0          // which 7-cycle round we're in
     var scanInProgress = false
@@ -173,12 +180,52 @@ if #available(macOS 26.0, *) {
             }
             guard let capturedImg = img else { return }
 
+            // Reader-mode deterministic override — bypasses VLM stochasticity.
+            // Uses Chrome window bounds as the content panel. Intended for demos
+            // against single-panel sites (Wikipedia, arXiv).
+            if forceReaderMode && cycleInRound == 1 && !vlmSucceeded {
+                let chromeDetected = ChromeCapture.chromeBounds()
+                let chrome = chromeDetected != .zero ? chromeDetected : CGRect(x: 100, y: 100, width: 1200, height: 800)
+                // Leave room for Chrome's top chrome (tabs + URL bar: ~110pt) and the bookmarks bar.
+                let contentInset: CGFloat = 130
+                let contentPanel = CGRect(
+                    x: chrome.minX + 10,
+                    y: chrome.minY + contentInset,
+                    width: chrome.width - 20,
+                    height: chrome.height - contentInset - 20
+                )
+                state.questionBounds = contentPanel
+                state.editorBounds = .zero
+                state.forceReading = true
+                vlmSucceeded = true
+                pixelDiff.reset()
+                state.questionScrollSignal.reset()
+                await MainActor.run {
+                    overlay.clear()
+                    overlay.showPanel(
+                        PanelRect(x: contentPanel.minX, y: contentPanel.minY,
+                                  width: contentPanel.width, height: contentPanel.height,
+                                  label: "READING", paragraphCount: 0),
+                        color: "blue", label: "READING"
+                    )
+                    setStatusSegments(round: roundCount, isVLM: false, detail: "reader mode · Chrome bounds locked")
+                    EngineModel.shared.vlmState = .ready
+                    EngineModel.shared.questionBounds = contentPanel
+                    EngineModel.shared.editorBounds = .zero
+                }
+                NSLog("ReaderMode: forced via GK_FORCE_READER — content panel %.0fx%.0f at (%.0f, %.0f)",
+                      contentPanel.width, contentPanel.height, contentPanel.minX, contentPanel.minY)
+                return
+            }
+
             // VLM scan frequency adapts to round number:
             //   Round 1: cycles 1, 3, 5 (3/7) — fast panel lock-in after startup
             //   Round 2: cycles 1, 4     (2/7) — refinement
             //   Round 3+: cycle 1 only   (1/7) — steady state
             let shouldRunVLM: Bool
-            if roundCount == 1 {
+            if forceReaderMode {
+                shouldRunVLM = false  // deterministic mode — never re-run VLM
+            } else if roundCount == 1 {
                 shouldRunVLM = [1, 3, 5].contains(cycleInRound)
             } else if roundCount == 2 {
                 shouldRunVLM = [1, 4].contains(cycleInRound)
@@ -306,6 +353,7 @@ if #available(macOS 26.0, *) {
                 await MainActor.run {
                     overlay.clear()
                     overlay.showSolutionOnQuestion(code: "", questionBounds: .zero)
+                    overlay.clearReaderSummary()
                     overlay.showCollectingBoxes([])
                     overlay.setQuestionPanelBlinking(false)
                     overlay.showGhostClues([])
@@ -406,16 +454,17 @@ if #available(macOS 26.0, *) {
                     // Reader mode: three stages
                     //   Stage 1 (collecting): red boxes around detected text, scroll pulse
                     //   Stage 2 (summarizing): blue border while Claude works
-                    //   Stage 3 (summary): summary card overlayed on top of content
+                    //   Stage 3 (summary): floating summary card anchored next to the panel
                     let summary = state.readingSummary
                     let charCount = state.questionText.count
                     if !summary.isEmpty && state.questionBounds != .zero {
-                        // Stage 3 — display summary overlay on the content panel
+                        // Stage 3 — floating summary card (elegant, non-intrusive)
                         overlay.showCollectingBoxes([])
                         overlay.setQuestionPanelBlinking(false)
+                        // The solution-on-panel overlay is cleared so only the floating card is visible
+                        overlay.showSolutionOnQuestion(code: "", questionBounds: .zero)
                         if !diagnosticHideOverlay {
-                            let headed = "══ SUMMARY ══\n\n" + summary
-                            overlay.showSolutionOnQuestion(code: headed, questionBounds: state.questionBounds)
+                            overlay.showReaderSummary(summary, nearPanel: state.questionBounds)
                         }
                         let bulletCount = summary.components(separatedBy: "\n").filter { $0.contains("•") }.count
                         setStatusSegments(round: rnd, isVLM: false, detail: "\(scanNum)/6 · Summary (\(bulletCount) bullets)")

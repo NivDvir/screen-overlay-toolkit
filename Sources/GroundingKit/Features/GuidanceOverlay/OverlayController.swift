@@ -125,6 +125,31 @@ public class OverlayController {
         viewModel.solutionCode = code
         viewModel.questionBounds = questionBounds
     }
+
+    /// Reader-mode output — a floating summary card anchored next to the content panel.
+    /// The card uses a translucent material so the underlying article stays readable behind it.
+    /// Bullets are extracted from `•`-prefixed lines in `text`; other lines are dropped.
+    public func showReaderSummary(_ text: String, nearPanel bounds: CGRect) {
+        let parsed = Self.parseBullets(from: text)
+        viewModel.summaryBullets = parsed
+        viewModel.summaryAnchor = bounds
+    }
+
+    public func clearReaderSummary() {
+        viewModel.summaryBullets = []
+        viewModel.summaryAnchor = .zero
+    }
+
+    private static func parseBullets(from text: String) -> [String] {
+        let trimSet = CharacterSet(charactersIn: "•◦‣⁃-* \t")
+        return text.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { line in
+                line.hasPrefix("•") || line.hasPrefix("-") || line.hasPrefix("*")
+            }
+            .map { $0.trimmingCharacters(in: trimSet) }
+            .filter { !$0.isEmpty }
+    }
 }
 
 public struct StatusSegment {
@@ -157,6 +182,10 @@ class OverlayViewModel: ObservableObject {
     @Published var collectingBoxes: [CGRect] = []
     /// Whether the question panel border should blink (Stage 2: waiting for Claude)
     @Published var questionPanelBlinking: Bool = false
+    /// Reader-mode summary bullets (card floats next to content panel)
+    @Published var summaryBullets: [String] = []
+    /// Panel the summary card should anchor next to
+    @Published var summaryAnchor: CGRect = .zero
     /// Brief flash text for corner triggers (reset, screenshot escalation)
     @Published var cornerFlash: String = ""
 }
@@ -245,6 +274,24 @@ struct OverlayView: View {
                     .position(x: qb.midX, y: qb.midY)
                 }
 
+                // Reader-mode summary card — floats next to the content panel,
+                // translucent so the article stays readable behind it.
+                if !viewModel.summaryBullets.isEmpty && viewModel.summaryAnchor != .zero {
+                    let anchor = viewModel.summaryAnchor
+                    let cardWidth: CGFloat = 360
+                    let cardHSide: CGFloat = cardWidth / 2
+                    let rightEdge = min(anchor.maxX - 18, screenW - 18)
+                    let cardX = rightEdge - cardHSide
+                    let cardY = anchor.minY + 230
+                    summaryCard(bullets: viewModel.summaryBullets, width: cardWidth)
+                        .position(x: cardX, y: cardY)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .opacity
+                        ))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.78), value: viewModel.summaryBullets.count)
+                }
+
                 // Ghost clues — solution lines rendered at editor positions
                 ForEach(Array(viewModel.ghostClues.enumerated()), id: \.offset) { _, clue in
                     ghostClueLine(clue)
@@ -296,6 +343,89 @@ struct OverlayView: View {
         case "red":    return .red
         default:       return .white
         }
+    }
+
+    /// Architectural palette (matches the AppIcon): deep navy + warm accent + slate.
+    private static let accentNavy = Color(red: 29/255, green: 74/255, blue: 137/255)
+    private static let accentWarm = Color(red: 240/255, green: 155/255, blue: 55/255)
+    private static let inkPrimary = Color(red: 22/255, green: 28/255, blue: 40/255)
+    private static let inkMuted   = Color(red: 80/255, green: 95/255, blue: 115/255)
+
+    @ViewBuilder
+    func summaryCard(bullets: [String], width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            // Header row
+            HStack(spacing: 8) {
+                Image(systemName: "scope")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Self.accentNavy)
+                Text("Summary")
+                    .font(.system(size: 13, weight: .semibold, design: .default))
+                    .foregroundColor(Self.inkPrimary)
+                Spacer(minLength: 8)
+                Text("\(bullets.count) points")
+                    .font(.system(size: 10, weight: .medium, design: .default))
+                    .foregroundColor(Self.inkMuted)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(Self.accentNavy.opacity(0.08))
+                    )
+            }
+
+            // Hairline divider
+            Rectangle()
+                .fill(Self.accentNavy.opacity(0.14))
+                .frame(height: 1)
+
+            // Bullet list
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(Array(bullets.enumerated()), id: \.offset) { _, bullet in
+                    HStack(alignment: .top, spacing: 9) {
+                        Text("•")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(Self.accentWarm)
+                            .frame(width: 10, alignment: .leading)
+                        Text(bullet)
+                            .font(.system(size: 12, weight: .regular, design: .default))
+                            .foregroundColor(Self.inkPrimary)
+                            .lineSpacing(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+
+            // Footer attribution
+            HStack(spacing: 5) {
+                Spacer(minLength: 0)
+                Image(systemName: "sparkle")
+                    .font(.system(size: 8))
+                    .foregroundColor(Self.inkMuted.opacity(0.6))
+                Text("grounded locally by GroundingKit")
+                    .font(.system(size: 9, weight: .medium, design: .default))
+                    .foregroundColor(Self.inkMuted.opacity(0.65))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(width: width, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color(red: 0.985, green: 0.988, blue: 0.995))  // near-white cool, matches icon palette
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Self.accentNavy.opacity(0.45), Self.accentNavy.opacity(0.20)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1.2
+                )
+        )
+        .shadow(color: Self.accentNavy.opacity(0.25), radius: 18, x: 0, y: 8)
+        .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 2)
     }
 
     @ViewBuilder
