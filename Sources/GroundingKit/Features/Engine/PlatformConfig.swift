@@ -1,3 +1,4 @@
+import Foundation
 import CoreGraphics
 import AppKit
 
@@ -102,7 +103,13 @@ public struct PlatformConfig {
 
     /// Returns the active platform configuration. Default is `.generic`.
     /// Extend this method with additional detection heuristics to target specific sites.
+    ///
+    /// Env var overrides (for demos / testing):
+    ///   - `GK_READER=1` → force `.reader` preset regardless of site
     public static func detect() -> PlatformConfig {
+        if ProcessInfo.processInfo.environment["GK_READER"] == "1" {
+            return .reader
+        }
         return .generic
     }
 }

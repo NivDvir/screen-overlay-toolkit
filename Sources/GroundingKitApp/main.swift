@@ -241,8 +241,18 @@ if #available(macOS 26.0, *) {
                     EngineModel.shared.vlmState = .inferring
                 }
 
+                // Choose VLM prompt mode from platform config (reader vs two-panel).
+                // .auto starts with two-panel; main.swift auto-switches to reader based on
+                // editor-width heuristic after first detection.
+                let vlmMode: NativePanelDetector.DetectionMode
+                switch platform.overlayMode.layoutMode {
+                case .reader:   vlmMode = .reader
+                case .twoPanel: vlmMode = .twoPanel
+                case .auto:     vlmMode = state.forceReading ? .reader : .twoPanel
+                }
+
                 Task.detached {
-                    if let analysis = await detector.detectPanels(from: vlmImage) {
+                    if let analysis = await detector.detectPanels(from: vlmImage, mode: vlmMode) {
                         // Lock bounds after first stable VLM run.
                         // VLM bbox estimates fluctuate wildly between runs
                         // (e.g. 820px wide vs 634px wide for same panel).

@@ -177,7 +177,15 @@ public class NativePanelDetector {
         return CGSize(width: max(rw, factor), height: max(rh, factor))
     }
 
-    public func detectPanels(from image: CGImage) async -> ScreenAnalysis? {
+    /// Detection mode hint. `.twoPanel` is the LeetCode-style question+editor grounding
+    /// prompt; `.reader` asks the VLM to locate the main reading-content area while
+    /// excluding navigation chrome and sidebars.
+    public enum DetectionMode {
+        case twoPanel
+        case reader
+    }
+
+    public func detectPanels(from image: CGImage, mode: DetectionMode = .twoPanel) async -> ScreenAnalysis? {
         guard let container = self.container else { return nil }
 
         let retinaScale = screenScaleFactor
@@ -218,17 +226,72 @@ public class NativePanelDetector {
         let start = CFAbsoluteTimeGetCurrent()
         await MainActor.run { self.onProgress?("🔍 VLM processing image...") }
 
-        // Single-stage: detect Q and E panels directly
-        let panelResults = await runVLM(container, image: ciImage,
-            prompt: "Detect these two UI panels and output their bbox_2d coordinates as a JSON array:\n1. \"question\" - the problem description panel on the left\n2. \"editor\" - the code editor panel on the right",
-            resize: resize)
+        // Mode-specific prompt — two-panel test-taking vs single-panel reading
+        let prompt: String
+        let requiredPanels: Int
+        switch mode {
+        case .twoPanel:
+            prompt = "Detect these two UI panels and output their bbox_2d coordinates as a JSON array:\n1. \"question\" - the problem description panel on the left\n2. \"editor\" - the code editor panel on the right"
+            requiredPanels = 2
+        case .reader:
+            prompt = """
+            Locate the main reading-content area of this webpage. This is the single region where the primary article body, paper text, or documentation prose is displayed — the part a reader would actually read.
+
+            EXCLUDE from the bounding box:
+            - The browser chrome at the very top (tabs, address bar, bookmarks bar).
+            - Site-level navigation (top menu bars, login widgets).
+            - Left-side table-of-contents or category sidebars.
+            - Right-side panels such as "Appearance", "Tools", settings, or related-links rails.
+            - Footers, ads, and "see also" strips at the bottom.
+
+            Output EXACTLY ONE object as a JSON array:
+            [{"label": "content", "bbox_2d": [x1, y1, x2, y2]}]
+
+            The bounding box should tightly enclose the reading-content region only.
+            """
+            requiredPanels = 1
+        }
+
+        let panelResults = await runVLM(container, image: ciImage, prompt: prompt, resize: resize)
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
-        NSLog("NativeVLM: inference %.0fms", elapsed)
+        NSLog("NativeVLM: inference %.0fms (mode=%@)", elapsed, String(describing: mode))
 
-        guard panelResults.count >= 2 else {
-            NSLog("NativeVLM: need 2 panels, got %d", panelResults.count)
+        guard panelResults.count >= requiredPanels else {
+            NSLog("NativeVLM: need %d panels, got %d (mode=%@)", requiredPanels, panelResults.count, String(describing: mode))
             return nil
+        }
+
+        // Reader mode: return a ScreenAnalysis with only the content panel set as "question".
+        // Editor panel gets a collapsed zero-width sentinel so downstream code treats it
+        // as single-panel (reader flow).
+        if mode == .reader {
+            let scaleX = screenW / resize.width
+            let scaleY = screenH / resize.height
+            let b = panelResults[0].bbox
+            let x1 = b[0] * scaleX, y1 = b[1] * scaleY
+            let x2 = b[2] * scaleX, y2 = b[3] * scaleY
+            NSLog("NativeVLM[reader]: content → screen(%.0f,%.0f)-(%.0f,%.0f)", x1, y1, x2, y2)
+            let content = PanelInfo(
+                bounds: CGRect(x: x1, y: y1, width: x2 - x1, height: y2 - y1),
+                title: "content",
+                content: "",
+                lineHeight: 21,
+                firstLineY: y1 + 20
+            )
+            let collapsed = PanelInfo(
+                bounds: CGRect(x: x2, y: y1, width: 0, height: 0),
+                title: "editor",
+                content: "",
+                lineHeight: 21,
+                firstLineY: y1
+            )
+            return ScreenAnalysis(
+                platform: "reader",
+                questionPanel: content,
+                editorPanel: collapsed,
+                solution: MockSolution(problemId: "reader", keywords: [], lines: [])
+            )
         }
 
         // Map model coords → logical screen coords
