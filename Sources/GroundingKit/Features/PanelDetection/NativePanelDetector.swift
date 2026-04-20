@@ -148,6 +148,19 @@ public class NativePanelDetector {
             }
 
             NSLog("NativeVLM raw response (%d tok): %@", tokenCount, String(response.prefix(400)))
+            // Test hook: if GK_RAW_OUT is set, append raw response to that file.
+            if let rawOutPath = ProcessInfo.processInfo.environment["GK_RAW_OUT"] {
+                let line = "=== tokens=\(tokenCount) ===\n\(response)\n=== END ===\n"
+                if let data = line.data(using: .utf8) {
+                    if FileManager.default.fileExists(atPath: rawOutPath) {
+                        if let fh = FileHandle(forWritingAtPath: rawOutPath) {
+                            fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+                        }
+                    } else {
+                        FileManager.default.createFile(atPath: rawOutPath, contents: data)
+                    }
+                }
+            }
 
             // Native Qwen2.5-VL grounding-token format (also used by UI-TARS):
             //   <|object_ref_start|>LABEL<|object_ref_end|><|box_start|>(x1,y1),(x2,y2)<|box_end|>
