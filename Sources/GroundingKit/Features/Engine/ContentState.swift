@@ -1,8 +1,9 @@
 import Foundation
 import CoreGraphics
 
-/// Question type detected from editor panel content
-public enum QuestionType { case coding, mcq, unknown }
+/// Question type detected from the active panel(s).
+/// `.reading` is single-panel reader-mode — no editor, solution-generator produces a summary.
+public enum QuestionType { case coding, mcq, reading, unknown }
 
 /// MCQ answer from LLM
 public struct MCQAnswer {
@@ -107,6 +108,23 @@ public class ContentState {
     public var claudeInFlight: Bool { queue.sync { _claudeInFlight } }
     public var mcqAnswer: MCQAnswer? { queue.sync { _mcqAnswer } }
     public var mcqRequested: Bool { queue.sync { _mcqRequested } }
+
+    // Reader mode: when the layout is single-panel reading (Wikipedia / arXiv / docs).
+    // Set by the engine after VLM detection; overrides the coding/MCQ classifier below.
+    private var _forceReading: Bool = false
+    public var forceReading: Bool {
+        get { queue.sync { _forceReading } }
+        set { queue.sync { _forceReading = newValue } }
+    }
+    /// Summary bullets returned by the summarizer when in reading mode.
+    private var _readingSummary: String = ""
+    public var readingSummary: String { queue.sync { _readingSummary } }
+    public func setReadingSummary(_ s: String) {
+        queue.sync { _readingSummary = s }
+    }
+    private var _lastReadingHash: String = ""
+    private var _readingRequested: Bool = false
+    public var readingRequested: Bool { queue.sync { _readingRequested } }
 
     /// Check and consume the visual reset flag.
     /// Returns true once, then resets to false.
@@ -255,6 +273,38 @@ public class ContentState {
                 _editorLines = e.lines
                 _editorBounds = e.bounds
                 _lineHeight = e.lineHeight
+            }
+
+            // Reader-mode short-circuit — when the engine has detected a single-panel
+            // reading layout (editor panel <15% of screen, or PlatformConfig forces it),
+            // skip the coding/MCQ classifier entirely and request a summary.
+            if _forceReading {
+                let prevType = _questionType
+                _questionType = .reading
+                if prevType != .reading {
+                    NSLog("ContentState: question type → READING (reader mode)")
+                    _mcqRequested = false
+                    _mcqAnswer = nil
+                }
+                // Kick summarizer when we have enough accumulated text for a meaningful summary.
+                // Don't re-ask until content changes appreciably (120-char prefix hash).
+                let currentHash = String(_questionText.prefix(120))
+                if !_readingRequested && _questionText.count > 200 && currentHash != _lastReadingHash {
+                    _readingRequested = true
+                    _lastReadingHash = currentHash
+                    let contentSnapshot = _questionText
+                    NSLog("ContentState: asking summarizer (%d chars)", contentSnapshot.count)
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        guard let self = self else { return }
+                        if let summary = ClaudeSolver.summarize(content: contentSnapshot) {
+                            self.setReadingSummary(summary)
+                        } else {
+                            NSLog("ContentState: summarizer returned nil — will retry on next scan")
+                            self.queue.sync { self._readingRequested = false }
+                        }
+                    }
+                }
+                return
             }
 
             // Detect question type via two signals:

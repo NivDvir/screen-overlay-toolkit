@@ -227,6 +227,25 @@ if #available(macOS 26.0, *) {
                             return
                         }
 
+                        // Detect reader mode — single-panel layout where the "editor" panel
+                        // either collapsed to 0x0 after Chrome clamp or is a thin sidebar
+                        // (< 15% of screen width). Activates unless Platform overrides to .twoPanel.
+                        let editorWidthRatio = screenW > 0 ? newE.width / screenW : 0
+                        let detectedReader = editorWidthRatio < 0.15
+                        let isReader: Bool
+                        switch platform.overlayMode.layoutMode {
+                        case .reader:   isReader = true
+                        case .twoPanel: isReader = false
+                        case .auto:     isReader = detectedReader
+                        }
+                        if state.forceReading != isReader {
+                            state.forceReading = isReader
+                            NSLog("LayoutMode: %@ (editor %.0f%% of screen, platform=%@)",
+                                  isReader ? "reader" : "two-panel",
+                                  editorWidthRatio * 100,
+                                  platform.overlayMode.layoutMode.rawValue)
+                        }
+
                         if oldQ == .zero {
                             // First VLM run — accept bounds
                             state.questionBounds = newQ
@@ -361,13 +380,16 @@ if #available(macOS 26.0, *) {
                 }
             }
 
-            // Route MCQ vs Coding
+            // Route Reading vs MCQ vs Coding
+            let isReading = state.questionType == .reading
             let isMCQ = state.questionType == .mcq
             let mode = platform.overlayMode
 
-            // Generate editor-side clues only if stepAdvancement is enabled
+            // Generate editor-side clues only if stepAdvancement is enabled (never in reader mode)
             let newClues: [GhostClue]
-            if isMCQ {
+            if isReading {
+                newClues = []
+            } else if isMCQ {
                 newClues = GhostLayout.generateMCQClues(from: state)
             } else if mode.stepAdvancement {
                 newClues = GhostLayout.generateClues(from: state)
@@ -380,7 +402,52 @@ if #available(macOS 26.0, *) {
                     overlay.showGhostClues(newClues)
                 }
 
-                if isMCQ {
+                if isReading {
+                    // Reader mode: three stages
+                    //   Stage 1 (collecting): red boxes around detected text, scroll pulse
+                    //   Stage 2 (summarizing): blue border while Claude works
+                    //   Stage 3 (summary): summary card overlayed on top of content
+                    let summary = state.readingSummary
+                    let charCount = state.questionText.count
+                    if !summary.isEmpty && state.questionBounds != .zero {
+                        // Stage 3 — display summary overlay on the content panel
+                        overlay.showCollectingBoxes([])
+                        overlay.setQuestionPanelBlinking(false)
+                        if !diagnosticHideOverlay {
+                            let headed = "══ SUMMARY ══\n\n" + summary
+                            overlay.showSolutionOnQuestion(code: headed, questionBounds: state.questionBounds)
+                        }
+                        let bulletCount = summary.components(separatedBy: "\n").filter { $0.contains("•") }.count
+                        setStatusSegments(round: rnd, isVLM: false, detail: "\(scanNum)/6 · Summary (\(bulletCount) bullets)")
+                    } else if state.readingRequested {
+                        // Stage 2 — Claude in flight
+                        overlay.showSolutionOnQuestion(code: "", questionBounds: .zero)
+                        if vlmSucceeded, let qPanel = scan.questionPanel {
+                            let qb = state.questionBounds
+                            let boxes = qPanel.lines
+                                .filter { $0.bounds.midX >= qb.minX && $0.bounds.midX <= qb.maxX }
+                                .filter { $0.bounds.midY >= qb.minY && $0.bounds.midY <= qb.maxY }
+                                .map { $0.bounds }
+                            overlay.showCollectingBoxes(boxes)
+                        }
+                        overlay.setQuestionPanelBlinking(true)
+                        setStatusSegments(round: rnd, isVLM: false, detail: "\(scanNum)/6 · Summarizing \(charCount) chars…")
+                    } else {
+                        // Stage 1 — accumulating content
+                        if vlmSucceeded, let qPanel = scan.questionPanel {
+                            let qb = state.questionBounds
+                            let boxes = qPanel.lines
+                                .filter { $0.bounds.midX >= qb.minX && $0.bounds.midX <= qb.maxX }
+                                .filter { $0.bounds.midY >= qb.minY && $0.bounds.midY <= qb.maxY }
+                                .map { $0.bounds }
+                            overlay.showCollectingBoxes(boxes)
+                        }
+                        overlay.showSolutionOnQuestion(code: "", questionBounds: .zero)
+                        overlay.setQuestionPanelBlinking(false)
+                        let scrollArrow = state.questionScrollSignal.needsScrollDown ? " ▼" : ""
+                        setStatusSegments(round: rnd, isVLM: false, detail: "\(scanNum)/6 · Reading \(charCount) chars\(scrollArrow)")
+                    }
+                } else if isMCQ {
                     // MCQ: same three-stage visual flow as coding.
                     // Stage 1: collecting (red boxes) — before Claude called
                     // Stage 2: blue blinking, NO overlay — Claude in flight

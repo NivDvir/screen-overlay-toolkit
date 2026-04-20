@@ -21,6 +21,44 @@ enum ClaudeSolver {
 
     /// Ask Claude to provide a complete coding solution. Returns code text or nil.
     /// Runs synchronously (call from background queue).
+    /// Reader-mode summarizer — produces a compact bullet summary of long-form reading content.
+    /// Used by reader mode (Wikipedia, arXiv, documentation pages).
+    public static func summarize(content: String) -> String? {
+        questionCount += 1
+        let qNum = questionCount
+
+        let prompt: String
+        if !sessionStarted {
+            sessionStarted = true
+            prompt = """
+            You are helping a reader skim long-form content captured from their own screen — an article, a paper, documentation, or similar.
+            Reply with a compact summary in EXACTLY this format:
+             • one-line bullet
+             • one-line bullet
+             • one-line bullet
+             • ...
+
+            5–8 bullets, each 8–14 words, each stating a concrete claim or fact from the content. No preamble, no sign-off, no markdown headers. Use '• ' (U+2022 + space) as the marker for each bullet.
+
+            Content:
+            \(content)
+            """
+        } else {
+            prompt = """
+            Produce a 5–8 bullet compact summary of the following content. Same format as before: '• ' markers, 8–14 words per bullet, factual.
+
+            Content:
+            \(content)
+            """
+        }
+
+        NSLog("ClaudeSummary: sending Q%d (%d chars)", qNum, content.count)
+        guard let output = runClaude(prompt: prompt, resume: qNum > 1) else { return nil }
+        let summary = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        NSLog("ClaudeSummary: Q%d got %d chars", qNum, summary.count)
+        return summary.isEmpty ? nil : summary
+    }
+
     static func solveCoding(question: String, editorCode: String) -> String? {
         questionCount += 1
         let qNum = questionCount
