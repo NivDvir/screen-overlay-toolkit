@@ -421,11 +421,49 @@ public class NativePanelDetector {
                 return nil
             }
 
+            // UI-TARS returns click points (zero-area rects). Expand the content point
+            // into a usable reading rectangle centered on the click. Dimensions target
+            // the Chrome window's content area, with the whole screen as a fallback
+            // for when chromeBounds returns a bogus (too small / floating-utility
+            // window) result.
+            var contentRect = c.rect
+            if contentRect.width < 20 || contentRect.height < 20 {
+                let chrome = ChromeCapture.chromeBounds()
+                // Require Chrome bounds be at least 600×400 logical to trust them
+                let useChrome = chrome.width >= 600 && chrome.height >= 400
+                let frameW: CGFloat = useChrome ? chrome.width : screenW
+                let frameH: CGFloat = useChrome ? chrome.height : screenH
+                let frameMinX: CGFloat = useChrome ? chrome.minX : 0
+                let frameMinY: CGFloat = useChrome ? chrome.minY : 0
+                // Default reader rectangle: 70% of page width × 75% of page height,
+                // centered on the content click point.
+                let targetW = frameW * 0.70
+                let targetH = frameH * 0.75
+                let cx = c.rect.midX
+                let cy = c.rect.midY
+                var ex = cx - targetW / 2
+                var ey = cy - targetH / 2
+                // Clamp inside page bounds with a small margin
+                let pageMinX = frameMinX + 10
+                let pageMinY = frameMinY + 80   // leave space for browser chrome / top nav
+                let pageMaxX = frameMinX + frameW - 10
+                let pageMaxY = frameMinY + frameH - 10
+                ex = max(pageMinX, min(ex, pageMaxX - targetW))
+                ey = max(pageMinY, min(ey, pageMaxY - targetH))
+                contentRect = CGRect(x: ex, y: ey, width: targetW, height: targetH)
+                NSLog("NativeVLM[reader] click-point expanded: click=(%.0f,%.0f) chromeBounds=%.0fx%.0f useChrome=%@ → %.0fx%.0f @ %.0f,%.0f",
+                      cx, cy, chrome.width, chrome.height, useChrome ? "yes" : "no",
+                      contentRect.width, contentRect.height, contentRect.minX, contentRect.minY)
+            }
+
             // Trim: if the VLM's content region overlaps a declared sidebar, push the
             // content's edges inward so the two don't overlap. The VLM sometimes draws
-            // the content region wide enough to include the sidebar visually.
-            var contentRect = c.rect
+            // the content region wide enough to include the sidebar visually. Skip
+            // this when the content was expanded from a click point (already clamped
+            // to chrome bounds above) and sidebar regions are also zero-area.
             for side in regions where sideLabels.contains(side.label) {
+                // Only trim if the sidebar has a real rect (width > 20)
+                guard side.rect.width > 20 else { continue }
                 // Right-side sidebar clips content's right edge
                 if side.label.contains("right") && side.rect.minX < contentRect.maxX && side.rect.minX > contentRect.minX {
                     contentRect.size.width = side.rect.minX - contentRect.minX - 6
