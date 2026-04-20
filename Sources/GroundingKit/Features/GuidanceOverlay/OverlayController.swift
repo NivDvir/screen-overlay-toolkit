@@ -39,8 +39,9 @@ public class OverlayController {
         window.isOpaque = false
         window.hasShadow = false
         window.ignoresMouseEvents = true
-        // window.sharingType = .none  // PRODUCTION: hides overlay from getDisplayMedia screen capture
-        // DEV MODE: overlay visible in screenshots for blog assets
+        // For demo/blog asset capture the overlay must be visible to screen recording.
+        // Override the ambient default (which may be .none on recent macOS) explicitly.
+        window.sharingType = .readOnly
         window.collectionBehavior = [.canJoinAllSpaces, .stationary]
 
         // SwiftUI view for rendering

@@ -215,12 +215,14 @@ if #available(macOS 26.0, *) {
                                   rawE.width, rawE.height, newE.width, newE.height)
                         }
                         // Sanity check: reject bounds that are obviously wrong.
-                        // Question panel: 20-70% of screen width.
-                        // MCQ questions have wider question panels (60%+) since there's no code editor.
+                        // Question panel: 20-95% of screen width.
+                        //  - LeetCode / HackerRank style (2-panel): ~50% width
+                        //  - MCQ questions: 60%+ (no code editor)
+                        //  - Single-panel layouts (Wikipedia articles, docs, PRs): up to ~95%
                         let screenW = NSScreen.main?.frame.width ?? 1800
                         let qWidthRatio = newQ.width / screenW
-                        if qWidthRatio < 0.20 || qWidthRatio > 0.70 {
-                            NSLog("NativeVLM: REJECTED — Q width ratio %.0f%% out of range (20-70%%)", qWidthRatio * 100)
+                        if qWidthRatio < 0.20 || qWidthRatio > 0.95 {
+                            NSLog("NativeVLM: REJECTED — Q width ratio %.0f%% out of range (20-95%%)", qWidthRatio * 100)
                             vlmRunning = false
                             return
                         }
