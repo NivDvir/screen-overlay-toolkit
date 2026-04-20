@@ -149,6 +149,67 @@ public class NativePanelDetector {
 
             NSLog("NativeVLM raw response (%d tok): %@", tokenCount, String(response.prefix(400)))
 
+            // Native Qwen2.5-VL grounding-token format (also used by UI-TARS):
+            //   <|object_ref_start|>LABEL<|object_ref_end|><|box_start|>(x1,y1),(x2,y2)<|box_end|>
+            // UI-TARS typically emits this with 0–1000 normalized coordinates — scale
+            // them back to the model's resize dimensions so the downstream code path
+            // (which assumes model-space pixels) works unchanged.
+            if response.contains("<|box_start|>") {
+                var results: [(bbox: [Double], label: String)] = []
+                let scale = 1000.0  // UI-TARS / native grounding tokens: 0–1000 normalized
+                let w = Double(resize.width), h = Double(resize.height)
+
+                // Pattern A — Qwen2.5-VL native: two-corner rectangle with ref tokens.
+                let patA = #"<\|object_ref_start\|>(.+?)<\|object_ref_end\|><\|box_start\|>\((\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\),\((\d+(?:\.\d+)?),(\d+(?:\.\d+)?)\)<\|box_end\|>"#
+                if let re = try? NSRegularExpression(pattern: patA, options: []) {
+                    let range = NSRange(response.startIndex..., in: response)
+                    re.enumerateMatches(in: response, options: [], range: range) { m, _, _ in
+                        guard let m = m, m.numberOfRanges == 6,
+                              let l = Range(m.range(at: 1), in: response),
+                              let x1 = Range(m.range(at: 2), in: response),
+                              let y1 = Range(m.range(at: 3), in: response),
+                              let x2 = Range(m.range(at: 4), in: response),
+                              let y2 = Range(m.range(at: 5), in: response)
+                        else { return }
+                        let bx1 = (Double(response[x1]) ?? 0) / scale * w
+                        let by1 = (Double(response[y1]) ?? 0) / scale * h
+                        let bx2 = (Double(response[x2]) ?? 0) / scale * w
+                        let by2 = (Double(response[y2]) ?? 0) / scale * h
+                        results.append(([bx1, by1, bx2, by2], String(response[l])))
+                    }
+                }
+
+                // Pattern B — UI-TARS terse click format: LABEL<|box_start|>(x,y)<|box_end|>
+                // UI-TARS is trained for click-target prediction, so it emits a single
+                // (x, y) per element rather than a two-corner rectangle. We surface it
+                // as a zero-size "point rectangle" so the caller can see what was
+                // returned and decide how to use it.
+                if results.isEmpty {
+                    let patB = #"([A-Za-z][A-Za-z0-9_\-]*)\s*<\|box_start\|>\s*\((\d+(?:\.\d+)?),\s*(\d+(?:\.\d+)?)\)\s*<\|box_end\|>"#
+                    if let re = try? NSRegularExpression(pattern: patB, options: []) {
+                        let range = NSRange(response.startIndex..., in: response)
+                        re.enumerateMatches(in: response, options: [], range: range) { m, _, _ in
+                            guard let m = m, m.numberOfRanges == 4,
+                                  let l = Range(m.range(at: 1), in: response),
+                                  let xR = Range(m.range(at: 2), in: response),
+                                  let yR = Range(m.range(at: 3), in: response)
+                            else { return }
+                            let x = (Double(response[xR]) ?? 0) / scale * w
+                            let y = (Double(response[yR]) ?? 0) / scale * h
+                            // Zero-size point — downstream treats as center
+                            results.append(([x, y, x, y], String(response[l])))
+                        }
+                    }
+                    if !results.isEmpty {
+                        NSLog("NativeVLM: parsed %d UI-TARS click-points (label<|box_start|>(x,y))", results.count)
+                    }
+                }
+
+                if !results.isEmpty {
+                    return results
+                }
+            }
+
             let cleaned = response.replacingOccurrences(of: "```json", with: "")
                                   .replacingOccurrences(of: "```", with: "")
                                   .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -238,6 +299,11 @@ public class NativePanelDetector {
         let start = CFAbsoluteTimeGetCurrent()
         await MainActor.run { self.onProgress?("🔍 VLM processing image...") }
 
+        // Detect if the loaded model is UI-TARS — it was trained for UI click/
+        // locate tasks and responds better to a natural-language "locate" prompt
+        // than to the Qwen2.5-VL JSON-array prompt.
+        let isUITars = modelPath.contains("UI-TARS") || modelPath.lowercased().contains("ui-tars")
+
         // Mode-specific prompt — two-panel test-taking vs single-panel reading
         let prompt: String
         let requiredPanels: Int
@@ -246,28 +312,51 @@ public class NativePanelDetector {
             prompt = "Detect these two UI panels and output their bbox_2d coordinates as a JSON array:\n1. \"question\" - the problem description panel on the left\n2. \"editor\" - the code editor panel on the right"
             requiredPanels = 2
         case .reader:
-            // Broader framing: ask the VLM for a decomposition of the whole page
-            // into 2–4 labeled regions, then pick the content one algorithmically.
-            // Some Qwen-VL derivatives (notably UI-TARS, which is trained for click
-            // prediction) default to 2-element point output — we are explicit about
-            // wanting 4-element rectangles.
-            prompt = """
-            Decompose this webpage screenshot into its 2 to 4 main visual layout regions. Do not merge regions that are visually distinct (different background, clearly separated by whitespace, or different content type).
+            if isUITars {
+                // UI-TARS was trained on a locate/click task format. Ask in its native
+                // frame using Qwen2.5-VL's grounding tokens — UI-TARS inherits them
+                // (<|object_ref_start|>, <|box_start|>). Expect output like:
+                //   <|object_ref_start|>main reading content<|object_ref_end|>
+                //   <|box_start|>(x1,y1),(x2,y2)<|box_end|>
+                // Repeated per region.
+                prompt = """
+                Locate the 2 to 4 main layout regions in this webpage screenshot and output each as a bounding box using the native grounding tokens. The regions to locate are:
 
-            For each region, output a RECTANGLE bounding box as four pixel coordinates (not a click point): [x1, y1, x2, y2] where (x1, y1) is the top-left corner and (x2, y2) is the bottom-right corner. The array MUST contain exactly 4 numbers.
+                  - the main reading content column (article body / paper text)
+                  - any left-side navigation or table-of-contents sidebar
+                  - any right-side settings / related-links / access-paper panel
+                  - the top site navigation / header row
 
-            Pick a short semantic label for each region from this set:
-              "content"     — the main reading column / article body / paper text (prose).
-              "sidebar-left"— left-hand navigation, table of contents, tools rail.
-              "sidebar-right"— right-hand settings, appearance, access-paper / related-links panel.
-              "header"      — top site navigation / search bar / breadcrumb banner.
-              "footer"      — bottom tab strip, references row, page footer.
+                For every region that is present in the screenshot, output ONE line in this exact format:
 
-            Every visually distinct region gets its own entry. Do not omit a sidebar just because it is narrow.
+                <|object_ref_start|>LABEL<|object_ref_end|><|box_start|>(x1,y1),(x2,y2)<|box_end|>
 
-            Output a JSON array of 2–4 objects. Each object has exactly these keys:
-            [{"label": "<label>", "bbox_2d": [x1, y1, x2, y2]}, ...]
-            """
+                Where LABEL is one of: content, sidebar-left, sidebar-right, header.
+                And (x1,y1),(x2,y2) is the rectangle in normalized coordinates scaled to 0–1000, with (x1,y1) the top-left corner and (x2,y2) the bottom-right corner.
+
+                No prose, no JSON, no extra text — just the labeled box lines.
+                """
+            } else {
+                // Qwen2.5-VL and siblings — reliably produce JSON-array output when
+                // asked in this format.
+                prompt = """
+                Decompose this webpage screenshot into its 2 to 4 main visual layout regions. Do not merge regions that are visually distinct (different background, clearly separated by whitespace, or different content type).
+
+                For each region, output a RECTANGLE bounding box as four pixel coordinates (not a click point): [x1, y1, x2, y2] where (x1, y1) is the top-left corner and (x2, y2) is the bottom-right corner. The array MUST contain exactly 4 numbers.
+
+                Pick a short semantic label for each region from this set:
+                  "content"     — the main reading column / article body / paper text (prose).
+                  "sidebar-left"— left-hand navigation, table of contents, tools rail.
+                  "sidebar-right"— right-hand settings, appearance, access-paper / related-links panel.
+                  "header"      — top site navigation / search bar / breadcrumb banner.
+                  "footer"      — bottom tab strip, references row, page footer.
+
+                Every visually distinct region gets its own entry. Do not omit a sidebar just because it is narrow.
+
+                Output a JSON array of 2–4 objects. Each object has exactly these keys:
+                [{"label": "<label>", "bbox_2d": [x1, y1, x2, y2]}, ...]
+                """
+            }
             requiredPanels = 1
         }
 
