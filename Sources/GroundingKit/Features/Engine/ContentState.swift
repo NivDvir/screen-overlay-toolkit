@@ -2,33 +2,45 @@ import Foundation
 import CoreGraphics
 
 /// Question type detected from editor panel content
-enum QuestionType { case coding, mcq, unknown }
+public enum QuestionType { case coding, mcq, unknown }
 
 /// MCQ answer from LLM
-struct MCQAnswer {
-    let correctIndices: [Int]  // 0-based indices of correct options
-    let letters: String        // "A, B, C" or "B"
-    let numbers: String        // "2" or "1, 3" (1-based)
-    let questionSent: String   // the exact question text sent to LLM
-    let optionsSent: String    // the options text sent to LLM
-    let rawResponse: String    // LLM's raw response before parsing
+public struct MCQAnswer {
+    public let correctIndices: [Int]  // 0-based indices of correct options
+    public let letters: String        // "A, B, C" or "B"
+    public let numbers: String        // "2" or "1, 3" (1-based)
+    public let questionSent: String   // the exact question text sent to LLM
+    public let optionsSent: String    // the options text sent to LLM
+    public let rawResponse: String    // LLM's raw response before parsing
+
+    public init(correctIndices: [Int], letters: String, numbers: String,
+                questionSent: String, optionsSent: String, rawResponse: String) {
+        self.correctIndices = correctIndices
+        self.letters = letters
+        self.numbers = numbers
+        self.questionSent = questionSent
+        self.optionsSent = optionsSent
+        self.rawResponse = rawResponse
+    }
 }
 
 /// Tracks the complete state of both panels + solution progress across scans.
 /// Thread-safe: all mutations go through the serial queue.
 
-class ContentState {
+public class ContentState {
 
     private let queue = DispatchQueue(label: "com.groundingkit.contentstate")
+
+    public init() {}
 
     // Question panel
     private var _questionText: String = ""
     private var _questionBounds: CGRect = .zero
-    let questionAccumulator = ScrollAccumulator()
-    let questionScrollSignal = ScrollSignal()
-    let hScrollSignal = HScrollSignal()
-    var questionText: String { queue.sync { _questionText } }
-    var questionBounds: CGRect {
+    public let questionAccumulator = ScrollAccumulator()
+    public let questionScrollSignal = ScrollSignal()
+    public let hScrollSignal = HScrollSignal()
+    public var questionText: String { queue.sync { _questionText } }
+    public var questionBounds: CGRect {
         get { queue.sync { _questionBounds } }
         set { queue.sync { _questionBounds = newValue } }
     }
@@ -37,12 +49,12 @@ class ContentState {
     private var _editorLines: [DetectedLine] = []
     private var _editorBounds: CGRect = .zero
     private var _lineHeight: CGFloat = 18
-    var editorLines: [DetectedLine] { queue.sync { _editorLines } }
-    var editorBounds: CGRect {
+    public var editorLines: [DetectedLine] { queue.sync { _editorLines } }
+    public var editorBounds: CGRect {
         get { queue.sync { _editorBounds } }
         set { queue.sync { _editorBounds = newValue } }
     }
-    var lineHeight: CGFloat { queue.sync { _lineHeight } }
+    public var lineHeight: CGFloat { queue.sync { _lineHeight } }
 
     // Typed-line confirmation (brief flash when a line is detected as typed)
     struct TypedConfirmation {
@@ -74,13 +86,13 @@ class ContentState {
     private var _needsVisualReset: Bool = false  // signals main loop to reset VLM bounds + clear overlay
     private var _scansSinceTextStable: Int = 0   // count scans where question text didn't grow
     private var _lastQuestionTextLength: Int = 0 // for detecting when accumulation stalls
-    var solution: MockSolution? {
+    public var solution: MockSolution? {
         get { queue.sync { _solution } }
         set { queue.sync { _solution = newValue } }
     }
-    var missingLines: [MissingLine] { queue.sync { _missingLines } }
+    public var missingLines: [MissingLine] { queue.sync { _missingLines } }
     private var _deleteMarkers: [MissingLine] = []
-    var deleteMarkers: [MissingLine] { queue.sync { _deleteMarkers } }
+    public var deleteMarkers: [MissingLine] { queue.sync { _deleteMarkers } }
 
     // MCQ support
     private var _questionType: QuestionType = .unknown
@@ -91,14 +103,14 @@ class ContentState {
     // Coding question switching
     private var _lastCodingQuestionHash: String = ""  // detect coding question changes
     private var _codingSolutionCache: [String: MockSolution] = [:]  // hash → cached solution (survives question switches)
-    var questionType: QuestionType { queue.sync { _questionType } }
-    var claudeInFlight: Bool { queue.sync { _claudeInFlight } }
-    var mcqAnswer: MCQAnswer? { queue.sync { _mcqAnswer } }
-    var mcqRequested: Bool { queue.sync { _mcqRequested } }
+    public var questionType: QuestionType { queue.sync { _questionType } }
+    public var claudeInFlight: Bool { queue.sync { _claudeInFlight } }
+    public var mcqAnswer: MCQAnswer? { queue.sync { _mcqAnswer } }
+    public var mcqRequested: Bool { queue.sync { _mcqRequested } }
 
     /// Check and consume the visual reset flag.
     /// Returns true once, then resets to false.
-    func consumeVisualReset() -> Bool {
+    public func consumeVisualReset() -> Bool {
         queue.sync {
             if _needsVisualReset {
                 _needsVisualReset = false
@@ -131,12 +143,12 @@ class ContentState {
             }
         }
     }
-    var currentRound: Int { queue.sync { _currentRound } }
-    var totalRounds: Int { queue.sync { _totalRounds } }
-    var typedCount: Int { queue.sync { _typedCount } }
+    public var currentRound: Int { queue.sync { _currentRound } }
+    public var totalRounds: Int { queue.sync { _totalRounds } }
+    public var typedCount: Int { queue.sync { _typedCount } }
 
     /// Update from a deep scan result (thread-safe)
-    func update(from scan: ScanResult) {
+    public func update(from scan: ScanResult) {
         queue.sync {
             // Visible question lines from current scan — used for question change detection
             // outside the `if let q` block (MCQ and coding hash checks need it)
@@ -473,7 +485,7 @@ class ContentState {
     }
 
     /// Platform-specific class patterns for fold detection — set at startup
-    var templateClassPatterns: [String] = ["public class Solution", "class Solution"]
+    public var templateClassPatterns: [String] = ["public class Solution", "class Solution"]
 
     var needsSuperDeepScan = false
 
@@ -764,10 +776,18 @@ class ContentState {
     }
 }
 
-struct MissingLine {
-    let solutionIndex: Int
-    let text: String
-    let insertAfterY: CGFloat
-    let lineType: String       // "key", "ctx", "boiler"
-    let section: String        // "input", "logic", "output"
+public struct MissingLine {
+    public let solutionIndex: Int
+    public let text: String
+    public let insertAfterY: CGFloat
+    public let lineType: String       // "key", "ctx", "boiler"
+    public let section: String        // "input", "logic", "output"
+
+    public init(solutionIndex: Int, text: String, insertAfterY: CGFloat, lineType: String, section: String) {
+        self.solutionIndex = solutionIndex
+        self.text = text
+        self.insertAfterY = insertAfterY
+        self.lineType = lineType
+        self.section = section
+    }
 }

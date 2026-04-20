@@ -5,7 +5,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="GroundingKit"
-BINARY_NAME="GroundingKit"  # matches Package.swift target name
+BINARY_NAME="GroundingKitApp"  # matches Package.swift executable target name
+# (library target is "GroundingKit"; inside the bundle the binary is copied to "GroundingKitAgent")
 APP_BUNDLE="$SCRIPT_DIR/$APP_NAME.app"
 
 echo "Building $APP_NAME..."

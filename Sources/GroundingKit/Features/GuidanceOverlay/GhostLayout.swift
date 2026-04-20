@@ -4,17 +4,27 @@ import CoreGraphics
 /// Generates positioned ghost clues from content state.
 /// Each clue is a piece of ghost text rendered at exact editor coordinates.
 
-struct GhostClue {
-    let text: String
-    let x: CGFloat          // X position for the text box
-    let y: CGFloat          // Y position for the text box
-    let dashY: CGFloat      // Y for the dashed insertion line (between existing rows)
-    let dashEndX: CGFloat   // X where dashed line ends / box connects
-    let type: GhostType
-    let solutionIndex: Int
+public struct GhostClue {
+    public let text: String
+    public let x: CGFloat          // X position for the text box
+    public let y: CGFloat          // Y position for the text box
+    public let dashY: CGFloat      // Y for the dashed insertion line (between existing rows)
+    public let dashEndX: CGFloat   // X where dashed line ends / box connects
+    public let type: GhostType
+    public let solutionIndex: Int
+
+    public init(text: String, x: CGFloat, y: CGFloat, dashY: CGFloat, dashEndX: CGFloat, type: GhostType, solutionIndex: Int) {
+        self.text = text
+        self.x = x
+        self.y = y
+        self.dashY = dashY
+        self.dashEndX = dashEndX
+        self.type = type
+        self.solutionIndex = solutionIndex
+    }
 }
 
-enum GhostType: String {
+public enum GhostType: String {
     case deleteMarker = "delete"      // line to remove — solid strikethrough + X
     case insertMarker = "insert"      // next line to type — dashed line + box
     case typedConfirm = "typed_ok"    // ✓ line just typed — brief confirmation flash
@@ -32,12 +42,12 @@ enum GhostType: String {
     case mcqLabel = "mcq_label"        // "Answer: B" label on question panel
 }
 
-struct GhostLayout {
+public struct GhostLayout {
 
     /// Platform-specific UI keywords to ignore in editor OCR. Populate via PlatformConfig
     /// at startup. Default is empty (no UI filtering). Typical entries for coding platforms
     /// include editor chrome like "Run", "Submit", "Line:", "Col:", etc.
-    static var uiKeywords: [String] = []
+    public static var uiKeywords: [String] = []
 
     /// Generate ghost clues positioned in the editor panel.
     ///
@@ -46,7 +56,7 @@ struct GhostLayout {
     /// 1. DELETE markers — for editor lines NOT in solution (e.g., comments to remove)
     /// 2. ONE INSERT marker — for the NEXT missing solution line to type
     /// 3. Progress indicator
-    static func generateClues(from state: ContentState) -> [GhostClue] {
+    public static func generateClues(from state: ContentState) -> [GhostClue] {
         guard let solution = state.solution else { return [] }
 
         let editorBounds = state.editorBounds
@@ -238,7 +248,7 @@ struct GhostLayout {
     }
 
     /// Generate MCQ clues — green arrows pointing at correct answer options.
-    static func generateMCQClues(from state: ContentState) -> [GhostClue] {
+    public static func generateMCQClues(from state: ContentState) -> [GhostClue] {
         guard let mcq = state.mcqAnswer else { return [] }
 
         let editorBounds = state.editorBounds

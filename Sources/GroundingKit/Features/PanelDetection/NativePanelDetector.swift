@@ -30,13 +30,15 @@ private struct LocalTokenizerLoader: MLXLMCommon.TokenizerLoader {
 }
 
 /// Native panel detection using Qwen2.5-VL via MLX Swift with MROPE spatial encoding
-class NativePanelDetector {
+public class NativePanelDetector {
     private var container: ModelContainer?
 
-    var modelPath = ""
-    var onProgress: ((String) -> Void)?
+    public var modelPath = ""
+    public var onProgress: ((String) -> Void)?
 
-    func loadModel() async throws {
+    public init() {}
+
+    public func loadModel() async throws {
         guard container == nil else { return }
 
         let basePath = NSString(string: "~/.cache/huggingface/hub/models--mlx-community--Qwen2.5-VL-7B-Instruct-4bit/snapshots").expandingTildeInPath
@@ -175,7 +177,7 @@ class NativePanelDetector {
         return CGSize(width: max(rw, factor), height: max(rh, factor))
     }
 
-    func detectPanels(from image: CGImage) async -> ScreenAnalysis? {
+    public func detectPanels(from image: CGImage) async -> ScreenAnalysis? {
         guard let container = self.container else { return nil }
 
         let retinaScale = screenScaleFactor

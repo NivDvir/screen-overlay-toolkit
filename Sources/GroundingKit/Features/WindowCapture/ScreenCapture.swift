@@ -5,19 +5,19 @@ import CoreGraphics
 /// Screen capture + Vision text detection.
 /// Plain NSObject — no @MainActor, no async, no concurrency issues.
 /// Timer calls tick() on main thread → captures screen → Vision on background → updates overlay.
-final class ScreenCapture: NSObject {
+public final class ScreenCapture: NSObject {
     private let overlayController: OverlayController
     private var cycleCount = 0
     private var processing = false
     private let visionQueue = DispatchQueue(label: "ghost.vision", qos: .userInteractive)
 
-    init(overlayController: OverlayController) {
+    public init(overlayController: OverlayController) {
         self.overlayController = overlayController
         super.init()
     }
 
     /// Called by Timer on main run loop. Captures screen, dispatches Vision to background.
-    @objc func tick() {
+    @objc public func tick() {
         guard !processing else { return }
         processing = true
 

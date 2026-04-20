@@ -4,14 +4,14 @@ import AppKit
 /// Find and capture only the Chrome/browser window (excludes other app windows).
 /// This prevents OCR from reading overlapping IntelliJ, System Preferences, etc.
 
-struct ChromeCapture {
+public struct ChromeCapture {
 
     /// Optional window title keywords — if set, Chrome window matching one of these is preferred.
     /// Default: empty (any frontmost Chrome window). Populate via PlatformConfig for site-specific targeting.
-    static var windowKeywords: [String] = []
+    public static var windowKeywords: [String] = []
 
     /// Find the Chrome window matching platform keywords
-    static func findChromeWindowID() -> CGWindowID? {
+    public static func findChromeWindowID() -> CGWindowID? {
         guard let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
@@ -40,7 +40,7 @@ struct ChromeCapture {
 
     /// Get Chrome window bounds (logical coordinates) via CGWindowList.
     /// Returns the window frame or .zero if Chrome not found.
-    static func chromeBounds() -> CGRect {
+    public static func chromeBounds() -> CGRect {
         guard let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
             return .zero
         }
@@ -59,14 +59,14 @@ struct ChromeCapture {
 
     /// Clamp a rect to Chrome window bounds. Prevents VLM bounds from
     /// extending beyond Chrome into desktop/Finder content.
-    static func clampToChrome(_ rect: CGRect) -> CGRect {
+    public static func clampToChrome(_ rect: CGRect) -> CGRect {
         let chrome = chromeBounds()
         guard chrome != .zero else { return rect }
         return rect.intersection(chrome)
     }
 
     /// Capture ONLY the Chrome window (single window, not composited)
-    static func captureChrome() -> CGImage? {
+    public static func captureChrome() -> CGImage? {
         guard let wid = findChromeWindowID() else {
             NSLog("ChromeCapture: Chrome window not found, falling back to full screen")
             return CGWindowListCreateImage(CGRect.infinite, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution])

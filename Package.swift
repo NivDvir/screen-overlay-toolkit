@@ -3,20 +3,23 @@ import PackageDescription
 
 // GroundingKit — feature-organized Swift codebase for on-screen guidance on macOS.
 //
-// Directory layout (Sources/):
-//   • Sources/GroundingKit/Features/<Feature>/  — reusable feature modules
-//   • Sources/GroundingKitApp/                    — the macOS menu-bar app (reference consumer)
+// Two targets:
+//   • GroundingKit     — library. Depend on this from other Swift projects to
+//                        reuse the panel detection + OCR + overlay engine.
+//   • GroundingKitApp  — reference menu-bar app that consumes the library.
 //
-// Each feature folder is self-contained: copy it out with its README to use
-// standalone in another project.
-//
-// Phase 2 (next milestone) will split this into a proper library + executable
-// pair with public API boundaries. For now it's a single executable target
-// with feature-organized folders.
+// Layout:
+//   Sources/GroundingKit/Features/<Feature>/  — public library modules
+//   Sources/GroundingKit/TestSupport/          — standalone diagnostics (not shipped)
+//   Sources/GroundingKitApp/                   — macOS menu-bar app
 
 let package = Package(
     name: "GroundingKit",
     platforms: [.macOS(.v14)],
+    products: [
+        .library(name: "GroundingKit", targets: ["GroundingKit"]),
+        .executable(name: "GroundingKitApp", targets: ["GroundingKitApp"]),
+    ],
     dependencies: [
         // Pin to NivDvir's fork with MROPE fixes for Qwen2.5-VL (subject of dev.to publication).
         // Upstream ml-explore/mlx-swift-lm@8c9dd63 lacks these fixes. Fork commit b4ea2216
@@ -25,14 +28,20 @@ let package = Package(
         .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.12"),
     ],
     targets: [
-        .executableTarget(
+        .target(
             name: "GroundingKit",
             dependencies: [
                 .product(name: "MLXVLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "Transformers", package: "swift-transformers"),
             ],
-            path: "Sources"
-        )
+            path: "Sources/GroundingKit",
+            exclude: ["TestSupport"]
+        ),
+        .executableTarget(
+            name: "GroundingKitApp",
+            dependencies: ["GroundingKit"],
+            path: "Sources/GroundingKitApp"
+        ),
     ]
 )

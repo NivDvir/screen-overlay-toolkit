@@ -4,7 +4,10 @@ import CoreGraphics
 /// Detects when lines are truncated at the right edge of a panel,
 /// indicating a horizontally scrollable sub-panel (e.g. code blocks that exceed panel width).
 
-class HScrollSignal {
+public class HScrollSignal {
+
+    public init() {}
+
 
     /// Whether horizontal scroll-right signal is active
     private(set) var needsScrollRight = false

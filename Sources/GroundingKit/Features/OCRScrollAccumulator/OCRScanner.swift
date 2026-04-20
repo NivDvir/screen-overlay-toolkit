@@ -9,28 +9,44 @@ import AppKit
 
 // MARK: - Result Types
 
-struct ScanResult {
-    let timestamp: CFAbsoluteTime
-    let durationMs: Double
-    let questionPanel: PanelState?
-    let editorPanel: PanelState?
-    let allLines: [DetectedLine]
+public struct ScanResult {
+    public let timestamp: CFAbsoluteTime
+    public let durationMs: Double
+    public let questionPanel: PanelState?
+    public let editorPanel: PanelState?
+    public let allLines: [DetectedLine]
+
+    public init(timestamp: CFAbsoluteTime, durationMs: Double, questionPanel: PanelState?,
+                editorPanel: PanelState?, allLines: [DetectedLine]) {
+        self.timestamp = timestamp
+        self.durationMs = durationMs
+        self.questionPanel = questionPanel
+        self.editorPanel = editorPanel
+        self.allLines = allLines
+    }
 }
 
-struct PanelState {
-    let bounds: CGRect
-    let label: String
-    let lines: [DetectedLine]
-    let lineHeight: CGFloat
+public struct PanelState {
+    public let bounds: CGRect
+    public let label: String
+    public let lines: [DetectedLine]
+    public let lineHeight: CGFloat
+
+    public init(bounds: CGRect, label: String, lines: [DetectedLine], lineHeight: CGFloat) {
+        self.bounds = bounds
+        self.label = label
+        self.lines = lines
+        self.lineHeight = lineHeight
+    }
 }
 
-struct DetectedLine {
-    let text: String       // OCR'd text (line numbers stripped)
-    let rawText: String    // Original OCR text (before cleanup)
-    let bounds: CGRect
-    let confidence: Float
+public struct DetectedLine {
+    public let text: String       // OCR'd text (line numbers stripped)
+    public let rawText: String    // Original OCR text (before cleanup)
+    public let bounds: CGRect
+    public let confidence: Float
 
-    init(text: String, bounds: CGRect, confidence: Float = 1.0, stripLineNumbers: Bool = false) {
+    public init(text: String, bounds: CGRect, confidence: Float = 1.0, stripLineNumbers: Bool = false) {
         self.rawText = text
         // Strip leading line numbers ONLY for editor panel lines.
         // Line numbers are short (1-4 digits) followed by spaces.
@@ -50,17 +66,17 @@ struct DetectedLine {
 // MARK: - Deep Scanner
 
 @available(macOS 26.0, *)
-struct OCRScanner {
+public struct OCRScanner {
 
     /// Platform-specific sidebar labels to filter from question panel OCR — set at startup
-    static var sidebarLabels: [String] = ["editorial", "discussions", "submissions", "leaderboard", "problem"]
+    public static var sidebarLabels: [String] = ["editorial", "discussions", "submissions", "leaderboard", "problem"]
 
     /// Whether the editor uses a dark theme (controls image inversion for OCR) — set at startup
-    static var editorThemeIsDark: Bool = true
+    public static var editorThemeIsDark: Bool = true
 
     /// Scan a single panel by cropping the image to its known bounds.
     /// Returns lines found within that panel, with coordinates in full-screen space.
-    static func scanPanel(image: CGImage, panelBounds: CGRect, label: String) async -> PanelState? {
+    public static func scanPanel(image: CGImage, panelBounds: CGRect, label: String) async -> PanelState? {
         // Wrap in autoreleasepool to release intermediate CGImage/CGContext allocations.
         // Without this, 3000+ invocations over 100 min would leak ~900MB.
         return autoreleasepool {
@@ -227,7 +243,7 @@ struct OCRScanner {
 
     /// Scan both panels using LLM-provided bounds.
     /// Each panel is scanned independently within its own domain.
-    static func scanWithBounds(image: CGImage, questionBounds: CGRect, editorBounds: CGRect) async -> ScanResult {
+    public static func scanWithBounds(image: CGImage, questionBounds: CGRect, editorBounds: CGRect) async -> ScanResult {
         let start = CFAbsoluteTimeGetCurrent()
 
         // Scan both panels in parallel
@@ -253,7 +269,7 @@ struct OCRScanner {
     }
 
     /// Full-screen scan (fallback when no LLM bounds available)
-    static func scanFull(image: CGImage) async -> ScanResult {
+    public static func scanFull(image: CGImage) async -> ScanResult {
         let start = CFAbsoluteTimeGetCurrent()
         let imgSize = CGSize(width: image.width, height: image.height)
         let scale = screenScaleFactor

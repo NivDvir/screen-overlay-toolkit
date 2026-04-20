@@ -15,14 +15,14 @@ struct TextBlock: Identifiable {
 
 /// Manages the transparent overlay window and renders detection results.
 /// No @MainActor — we call from main thread explicitly via DispatchQueue.main
-class OverlayController {
+public class OverlayController {
     private let window: NSWindow
     private let hostingView: NSHostingView<OverlayView>
     private let viewModel = OverlayViewModel()
 
-    var windowNumber: Int { window.windowNumber }
+    public var windowNumber: Int { window.windowNumber }
 
-    init() {
+    public init() {
         guard let screen = NSScreen.main else {
             fatalError("No screen available")
         }
@@ -56,42 +56,42 @@ class OverlayController {
         viewModel.textBlocks = blocks
     }
 
-    func showPanel(_ panel: PanelRect, color: String, label: String) {
+    public func showPanel(_ panel: PanelRect, color: String, label: String) {
         viewModel.panels.append(OverlayViewModel.PanelDisplay(
             rect: panel, color: color, label: label
         ))
     }
 
-    func clear() {
+    public func clear() {
         viewModel.panels = []
         viewModel.textBlocks = []
     }
 
-    func hide() {
+    public func hide() {
         window.orderOut(nil)
     }
 
-    func show() {
+    public func show() {
         window.orderFrontRegardless()
     }
 
-    func close() {
+    public func close() {
         window.orderOut(nil)
     }
 
-    func showGhostClues(_ clues: [GhostClue]) {
+    public func showGhostClues(_ clues: [GhostClue]) {
         viewModel.ghostClues = clues
     }
 
     /// Called whenever status changes. Consumers (e.g. a menu bar UI) can observe.
-    var onStatusChanged: ((String) -> Void)?
+    public var onStatusChanged: ((String) -> Void)?
 
-    func setStatus(_ text: String) {
+    public func setStatus(_ text: String) {
         viewModel.statusText = text
         onStatusChanged?(text)
     }
 
-    func setStatusSegments(_ segments: [StatusSegment]) {
+    public func setStatusSegments(_ segments: [StatusSegment]) {
         viewModel.statusSegments = segments
         onStatusChanged?(segments.map { $0.text }.joined())
     }
@@ -99,7 +99,7 @@ class OverlayController {
     /// Export the overlay window content as a CGImage (ghost clues on dark background).
     /// Used by the HumanPlayer process to "see" the overlay signals.
     /// Uses NSView.cacheDisplay to capture the SwiftUI rendering — bypasses sharingType = .none.
-    func exportOverlayFrame() -> CGImage? {
+    public func exportOverlayFrame() -> CGImage? {
         let bounds = hostingView.bounds
         guard bounds.width > 0 && bounds.height > 0 else { return nil }
 
@@ -109,26 +109,31 @@ class OverlayController {
     }
 
     /// Stage 1: Show red boxes around detected question text lines (collecting phase)
-    func showCollectingBoxes(_ boxes: [CGRect]) {
+    public func showCollectingBoxes(_ boxes: [CGRect]) {
         viewModel.collectingBoxes = boxes
     }
 
     /// Stage 2: Set whether the question panel border should blink
-    func setQuestionPanelBlinking(_ blinking: Bool) {
+    public func setQuestionPanelBlinking(_ blinking: Bool) {
         viewModel.questionPanelBlinking = blinking
     }
 
     /// Show the full solution code on top of the question panel as a reference sheet.
     /// Stays visible while the user types line-by-line on the editor side.
-    func showSolutionOnQuestion(code: String, questionBounds: CGRect) {
+    public func showSolutionOnQuestion(code: String, questionBounds: CGRect) {
         viewModel.solutionCode = code
         viewModel.questionBounds = questionBounds
     }
 }
 
-struct StatusSegment {
-    let text: String
-    let color: String  // "white", "yellow", "green", "gray", "cyan"
+public struct StatusSegment {
+    public let text: String
+    public let color: String  // "white", "yellow", "green", "gray", "cyan"
+
+    public init(text: String, color: String) {
+        self.text = text
+        self.color = color
+    }
 }
 
 /// Observable view model — bridges detection results to SwiftUI.

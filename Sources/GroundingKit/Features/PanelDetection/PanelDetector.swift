@@ -8,15 +8,24 @@ import AppKit
 ///
 /// No color analysis, no ML models, no DBSCAN — just native Vision layout analysis.
 
-struct PanelRect: CustomStringConvertible {
-    let x: CGFloat
-    let y: CGFloat
-    let width: CGFloat
-    let height: CGFloat
-    let label: String
-    let paragraphCount: Int
+public struct PanelRect: CustomStringConvertible {
+    public let x: CGFloat
+    public let y: CGFloat
+    public let width: CGFloat
+    public let height: CGFloat
+    public let label: String
+    public let paragraphCount: Int
 
-    var description: String { "(\(Int(x)),\(Int(y))) \(Int(width))x\(Int(height)) [\(paragraphCount) paragraphs]" }
+    public init(x: CGFloat, y: CGFloat, width: CGFloat, height: CGFloat, label: String, paragraphCount: Int) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.label = label
+        self.paragraphCount = paragraphCount
+    }
+
+    public var description: String { "(\(Int(x)),\(Int(y))) \(Int(width))x\(Int(height)) [\(paragraphCount) paragraphs]" }
 }
 
 private struct Para {

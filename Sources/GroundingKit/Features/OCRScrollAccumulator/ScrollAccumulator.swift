@@ -4,17 +4,19 @@ import Foundation
 /// Uses sliding-window overlap detection with fuzzy matching.
 /// Repeated lines (like "* int") are preserved because we match by position, not globally.
 
-class ScrollAccumulator {
+public class ScrollAccumulator {
 
-    struct AccumulatedLine {
-        let text: String
-        let quality: Int
+    public struct AccumulatedLine {
+        public let text: String
+        public let quality: Int
     }
 
-    private(set) var lines: [AccumulatedLine] = []
+    public private(set) var lines: [AccumulatedLine] = []
 
-    static let qualityFull = 1
-    static let qualityBounded = 2
+    public static let qualityFull = 1
+    public static let qualityBounded = 2
+
+    public init() {}
 
     /// Feed new visible lines. Uses overlap detection to find where the new
     /// visible window connects to the accumulated text, then appends new lines.

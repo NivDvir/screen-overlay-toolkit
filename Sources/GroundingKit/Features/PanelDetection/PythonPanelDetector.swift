@@ -5,19 +5,34 @@ import AppKit
 /// Super-Deep Scan: Qwen2.5-VL panel detection via persistent Python server.
 /// Model loaded ONCE (~5.3GB), stays in memory, accepts requests via stdin/stdout.
 
-struct ScreenAnalysis {
-    let platform: String
-    let questionPanel: PanelInfo
-    let editorPanel: PanelInfo
-    let solution: MockSolution
+public struct ScreenAnalysis {
+    public let platform: String
+    public let questionPanel: PanelInfo
+    public let editorPanel: PanelInfo
+    public let solution: MockSolution
+
+    public init(platform: String, questionPanel: PanelInfo, editorPanel: PanelInfo, solution: MockSolution) {
+        self.platform = platform
+        self.questionPanel = questionPanel
+        self.editorPanel = editorPanel
+        self.solution = solution
+    }
 }
 
-struct PanelInfo {
-    let bounds: CGRect
-    let title: String
-    let content: String
-    let lineHeight: CGFloat
-    let firstLineY: CGFloat
+public struct PanelInfo {
+    public let bounds: CGRect
+    public let title: String
+    public let content: String
+    public let lineHeight: CGFloat
+    public let firstLineY: CGFloat
+
+    public init(bounds: CGRect, title: String, content: String, lineHeight: CGFloat, firstLineY: CGFloat) {
+        self.bounds = bounds
+        self.title = title
+        self.content = content
+        self.lineHeight = lineHeight
+        self.firstLineY = firstLineY
+    }
 }
 
 class PythonPanelDetector {

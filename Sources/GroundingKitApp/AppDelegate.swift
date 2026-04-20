@@ -1,4 +1,5 @@
 import AppKit
+import GroundingKit
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var captureManager: ScreenCapture?

@@ -3,7 +3,7 @@ import CoreGraphics
 
 /// Detects when a panel needs scrolling and tracks scroll completion.
 
-class ScrollSignal {
+public class ScrollSignal {
 
     /// Lines that indicate end of question document (no more scroll needed)
     private static let endMarkers = ["Sample Output", "Explanation", "Note:", "Constraints"]
@@ -12,16 +12,18 @@ class ScrollSignal {
     private var previousVisibleLines: [String] = []
 
     /// Whether scroll-down signal is active
-    private(set) var needsScrollDown = false
+    public private(set) var needsScrollDown = false
 
     /// Whether we just captured new content from a scroll
-    private(set) var justCaptured = false
+    public private(set) var justCaptured = false
 
     /// Number of consecutive scans with identical content (stable = no more to scroll)
     private var stableCount = 0
 
+    public init() {}
+
     /// Evaluate after each DeepScan: should we show scroll arrow?
-    func evaluate(visibleLines: [String], panelBounds: CGRect, lineHeight: CGFloat) {
+    public func evaluate(visibleLines: [String], panelBounds: CGRect, lineHeight: CGFloat) {
         let cleaned = visibleLines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 
         justCaptured = false
@@ -54,7 +56,7 @@ class ScrollSignal {
     }
 
     /// Reset (e.g., when VLM re-detects panels)
-    func reset() {
+    public func reset() {
         previousVisibleLines = []
         needsScrollDown = false
         justCaptured = false

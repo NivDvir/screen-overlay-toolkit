@@ -8,28 +8,34 @@ import Foundation
 /// always returns nil and the LLM path (Gemini / Claude CLI) generates solutions at runtime.
 
 /// What the human player should do with this line
-enum LineAction: String {
+public enum LineAction: String {
     case keep   // template code already in editor — just verify it's there
     case delete // editor has this line (e.g., comment) — human should remove it
     case type   // human must type this line into the editor
 }
 
-struct SolutionLine {
-    let text: String
-    let type: String      // "key", "ctx", "boiler"
-    let section: String   // "input", "logic", "output"
-    let round: Int        // 1-4: which incremental round this line belongs to
-    let action: LineAction // what the human player does with this line
+public struct SolutionLine {
+    public let text: String
+    public let type: String      // "key", "ctx", "boiler"
+    public let section: String   // "input", "logic", "output"
+    public let round: Int        // 1-4: which incremental round this line belongs to
+    public let action: LineAction // what the human player does with this line
 
-    init(text: String, type: String, section: String, round: Int = 1, action: LineAction = .keep) {
+    public init(text: String, type: String, section: String, round: Int = 1, action: LineAction = .keep) {
         self.text = text; self.type = type; self.section = section; self.round = round; self.action = action
     }
 }
 
-struct MockSolution {
-    let problemId: String
-    let keywords: [String]   // matched against question text to find the right solution
-    let lines: [SolutionLine]
+public struct MockSolution {
+    public let problemId: String
+    public let keywords: [String]   // matched against question text to find the right solution
+    public let lines: [SolutionLine]
+
+    public init(problemId: String, keywords: [String], lines: [SolutionLine]) {
+        self.problemId = problemId
+        self.keywords = keywords
+        self.lines = lines
+    }
 }
 
 struct MockSolutions {

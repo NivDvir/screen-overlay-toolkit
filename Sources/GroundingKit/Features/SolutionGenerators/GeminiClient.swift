@@ -3,9 +3,9 @@ import Foundation
 /// Gemini 2.0 Flash API client for generating code solutions from problem text.
 /// Uses URLSession (no external dependencies). Thread-safe via serial queue.
 
-class GeminiClient {
+public class GeminiClient {
 
-    static let shared = GeminiClient()
+    public static let shared = GeminiClient()
 
     private let queue = DispatchQueue(label: "com.groundingkit.gemini")
     private let endpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
@@ -23,7 +23,7 @@ class GeminiClient {
     private var inFlight = false
 
     /// Platform-specific I/O hint for Gemini prompt — set at startup
-    var promptIOHint: String = ""
+    public var promptIOHint: String = ""
 
     /// Gemini API key — set the `GEMINI_API_KEY` environment variable. If not set,
     /// the Gemini path is disabled (methods will return nil without attempting a request).

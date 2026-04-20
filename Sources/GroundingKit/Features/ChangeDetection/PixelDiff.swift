@@ -5,7 +5,7 @@ import AppKit
 /// Captures only the editor region, hashes line-height bands, compares with previous frame.
 /// Detects which line changed in <15ms without OCR.
 
-class PixelDiff {
+public class PixelDiff {
 
     private var previousBandHashes: [UInt64] = []
     /// Stores the hash from 2 frames ago — used to detect cursor blink (toggle pattern)
@@ -15,10 +15,12 @@ class PixelDiff {
     private var overlayWindowID: CGWindowID = 0
 
     /// Last detected change: which band (line index) changed, and its Y position
-    private(set) var changedLineY: CGFloat?
-    private(set) var lastChangeTime: CFAbsoluteTime = 0
+    public private(set) var changedLineY: CGFloat?
+    public private(set) var lastChangeTime: CFAbsoluteTime = 0
 
-    func configure(editorBounds: CGRect, lineHeight: CGFloat, overlayWindowID: CGWindowID) {
+    public init() {}
+
+    public func configure(editorBounds: CGRect, lineHeight: CGFloat, overlayWindowID: CGWindowID) {
         self.editorBounds = editorBounds
         self.lineHeight = max(lineHeight, 10)
         self.overlayWindowID = overlayWindowID
@@ -26,7 +28,7 @@ class PixelDiff {
 
     /// Run one diff cycle. Returns true if a change was detected.
     @discardableResult
-    func detectChange() -> Bool {
+    public func detectChange() -> Bool {
         guard editorBounds.width > 50, editorBounds.height > 20 else { return false }
 
         let scale = screenScaleFactor
@@ -122,7 +124,7 @@ class PixelDiff {
     }
 
     /// Reset (e.g., after VLM re-detection changes bounds)
-    func reset() {
+    public func reset() {
         previousBandHashes = []
         twoFramesAgoBandHashes = []
         changedLineY = nil

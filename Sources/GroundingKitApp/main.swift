@@ -1,5 +1,6 @@
 import AppKit
 import Vision
+import GroundingKit
 
 // Redirect stdout/stderr to log file so logs are captured even when launched via double-click
 if let logFile = fopen("/tmp/ccsv_overlay.log", "w") {
