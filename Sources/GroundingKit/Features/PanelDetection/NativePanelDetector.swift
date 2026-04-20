@@ -236,15 +236,24 @@ public class NativePanelDetector {
             prompt = "Detect these two UI panels and output their bbox_2d coordinates as a JSON array:\n1. \"question\" - the problem description panel on the left\n2. \"editor\" - the code editor panel on the right"
             requiredPanels = 2
         case .reader:
+            // Broader framing: ask the VLM for a decomposition of the whole page
+            // into 2–4 labeled regions, then pick the content one algorithmically.
+            // VLMs decompose reliably; they fight single-target extraction ("the
+            // reading column") because the label is semantic, not visual.
             prompt = """
-            Locate the main reading column on this webpage — the single vertical column of prose that a "reader mode" browser extension would keep while stripping the rest. Return it as one bounding box.
+            Decompose this webpage screenshot into its 2 to 4 main visual layout regions. Do not merge regions that are visually distinct (different background, clearly separated by whitespace, or different content type).
 
-            INCLUDE, from top to bottom: the article's H1 title at the top of the column, any byline / date / "From Wikipedia, the free encyclopedia"-style metadata line immediately below the title, and every body paragraph with its in-flow sub-headings ("History", "Abstract", "Methods") down to the last paragraph visible in the screenshot.
+            For each region, return a bounding box and a short semantic label picked from this set:
+              "content"     — the main reading column / article body / paper text (prose).
+              "sidebar-left"— left-hand navigation, table of contents, tools rail.
+              "sidebar-right"— right-hand settings, appearance, access-paper / related-links panel.
+              "header"      — top site navigation / search bar / breadcrumb banner.
+              "footer"      — bottom tab strip, references row, page footer.
 
-            DO NOT extend the box into neighbouring panels. A sidebar is any visually distinct box with stacked links, buttons, or settings (not prose). Examples of sidebars to EXCLUDE: Wikipedia "Contents" / "Tools" / "Appearance" / "Languages"; arXiv "Access Paper" / "References & Citations" / "Bookmark" / "Current browse context"; top site nav (search box, login). Also exclude browser chrome (tabs, address bar) and any bottom tab strip or footer.
+            Every visually distinct region gets its own entry. Do not omit a sidebar just because it is narrow.
 
-            Output exactly one object as a JSON array:
-            [{"label": "content", "bbox_2d": [x1, y1, x2, y2]}]
+            Output a JSON array of 2–4 objects, each with exactly these keys:
+            [{"label": "<label>", "bbox_2d": [x1, y1, x2, y2]}, ...]
             """
             requiredPanels = 1
         }
@@ -259,29 +268,101 @@ public class NativePanelDetector {
             return nil
         }
 
-        // Reader mode: return a ScreenAnalysis with only the content panel set as "question".
-        // Editor panel gets a collapsed zero-width sentinel so downstream code treats it
-        // as single-panel (reader flow).
+        // Reader mode: the VLM decomposes the page into 2–4 labeled regions.
+        // We pick the content region algorithmically so the VLM doesn't have to
+        // nail a single-target answer.
         if mode == .reader {
             let scaleX = screenW / resize.width
             let scaleY = screenH / resize.height
-            let b = panelResults[0].bbox
-            let x1 = b[0] * scaleX, y1 = b[1] * scaleY
-            let x2 = b[2] * scaleX, y2 = b[3] * scaleY
-            NSLog("NativeVLM[reader]: content → screen(%.0f,%.0f)-(%.0f,%.0f)", x1, y1, x2, y2)
+
+            // Map every returned region into screen coords + area.
+            struct Region {
+                let rect: CGRect
+                let label: String
+                var area: CGFloat { rect.width * rect.height }
+                var aspect: CGFloat { rect.height > 0 ? rect.width / rect.height : 0 }
+            }
+            let regions: [Region] = panelResults.map { r in
+                let b = r.bbox
+                let rect = CGRect(
+                    x: b[0] * scaleX, y: b[1] * scaleY,
+                    width: (b[2] - b[0]) * scaleX, height: (b[3] - b[1]) * scaleY
+                )
+                return Region(rect: rect, label: r.label.lowercased())
+            }
+            for r in regions {
+                NSLog("NativeVLM[reader] region: %@ (%.0fx%.0f @ %.0f,%.0f)",
+                      r.label, r.rect.width, r.rect.height, r.rect.minX, r.rect.minY)
+            }
+
+            // Pick the content region:
+            //  1. Prefer anything labeled content/article/body/main/reading.
+            //  2. Otherwise, largest-area region that is not a sidebar/header/footer label
+            //     AND is wide enough (aspect > 0.4) and tall enough (> 180pt).
+            //  3. Fall back to the single largest region.
+            let contentLabels: Set<String> = ["content", "article", "body", "main", "reading"]
+            let sideLabels: Set<String> = ["sidebar-left", "sidebar-right", "sidebar", "left sidebar", "right sidebar", "header", "footer", "nav", "navigation"]
+
+            let explicit = regions.first { contentLabels.contains($0.label) }
+            let picked: Region?
+            if let e = explicit {
+                picked = e
+            } else {
+                let candidates = regions
+                    .filter { !sideLabels.contains($0.label) }
+                    .filter { $0.rect.width > 200 && $0.rect.height > 180 && $0.aspect > 0.4 }
+                picked = candidates.max(by: { $0.area < $1.area }) ?? regions.max(by: { $0.area < $1.area })
+            }
+
+            guard let c = picked else {
+                NSLog("NativeVLM[reader]: no usable region in %d returned", regions.count)
+                return nil
+            }
+
+            // Trim: if the VLM's content region overlaps a declared sidebar, push the
+            // content's edges inward so the two don't overlap. The VLM sometimes draws
+            // the content region wide enough to include the sidebar visually.
+            var contentRect = c.rect
+            for side in regions where sideLabels.contains(side.label) {
+                // Right-side sidebar clips content's right edge
+                if side.label.contains("right") && side.rect.minX < contentRect.maxX && side.rect.minX > contentRect.minX {
+                    contentRect.size.width = side.rect.minX - contentRect.minX - 6
+                }
+                // Left-side sidebar clips content's left edge
+                if side.label.contains("left") && side.rect.maxX > contentRect.minX && side.rect.maxX < contentRect.maxX {
+                    let shift = side.rect.maxX + 6 - contentRect.minX
+                    contentRect.origin.x = side.rect.maxX + 6
+                    contentRect.size.width -= shift
+                }
+                // Header clips content's top edge
+                if side.label == "header" && side.rect.maxY > contentRect.minY && side.rect.maxY < contentRect.maxY {
+                    let shift = side.rect.maxY + 4 - contentRect.minY
+                    contentRect.origin.y = side.rect.maxY + 4
+                    contentRect.size.height -= shift
+                }
+                // Footer clips content's bottom edge
+                if side.label == "footer" && side.rect.minY < contentRect.maxY && side.rect.minY > contentRect.minY {
+                    contentRect.size.height = side.rect.minY - contentRect.minY - 4
+                }
+            }
+
+            NSLog("NativeVLM[reader] picked content: '%@' %.0fx%.0f @ %.0f,%.0f (trimmed from %.0fx%.0f)",
+                  c.label, contentRect.width, contentRect.height, contentRect.minX, contentRect.minY,
+                  c.rect.width, c.rect.height)
+
             let content = PanelInfo(
-                bounds: CGRect(x: x1, y: y1, width: x2 - x1, height: y2 - y1),
+                bounds: contentRect,
                 title: "content",
                 content: "",
                 lineHeight: 21,
-                firstLineY: y1 + 20
+                firstLineY: contentRect.minY + 20
             )
             let collapsed = PanelInfo(
-                bounds: CGRect(x: x2, y: y1, width: 0, height: 0),
+                bounds: CGRect(x: contentRect.maxX, y: contentRect.minY, width: 0, height: 0),
                 title: "editor",
                 content: "",
                 lineHeight: 21,
-                firstLineY: y1
+                firstLineY: contentRect.minY
             )
             return ScreenAnalysis(
                 platform: "reader",
