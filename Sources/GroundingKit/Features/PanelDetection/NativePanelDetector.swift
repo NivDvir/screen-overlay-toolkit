@@ -137,6 +137,8 @@ public class NativePanelDetector {
                 await MainActor.run { self.onProgress?("🔍 VLM [\(bar)] \(tokenCount) tok — \(elapsed)s") }
             }
 
+            NSLog("NativeVLM raw response (%d tok): %@", tokenCount, String(response.prefix(400)))
+
             let cleaned = response.replacingOccurrences(of: "```json", with: "")
                                   .replacingOccurrences(of: "```", with: "")
                                   .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -235,19 +237,14 @@ public class NativePanelDetector {
             requiredPanels = 2
         case .reader:
             prompt = """
-            Locate the main reading-content area of this webpage. This is the single region where the primary article body, paper text, or documentation prose is displayed — the part a reader would actually read.
+            Locate the main reading column on this webpage — the single vertical column of prose that a "reader mode" browser extension would keep while stripping the rest. Return it as one bounding box.
 
-            EXCLUDE from the bounding box:
-            - The browser chrome at the very top (tabs, address bar, bookmarks bar).
-            - Site-level navigation (top menu bars, login widgets).
-            - Left-side table-of-contents or category sidebars.
-            - Right-side panels such as "Appearance", "Tools", settings, or related-links rails.
-            - Footers, ads, and "see also" strips at the bottom.
+            INCLUDE, from top to bottom: the article's H1 title at the top of the column, any byline / date / "From Wikipedia, the free encyclopedia"-style metadata line immediately below the title, and every body paragraph with its in-flow sub-headings ("History", "Abstract", "Methods") down to the last paragraph visible in the screenshot.
 
-            Output EXACTLY ONE object as a JSON array:
+            DO NOT extend the box into neighbouring panels. A sidebar is any visually distinct box with stacked links, buttons, or settings (not prose). Examples of sidebars to EXCLUDE: Wikipedia "Contents" / "Tools" / "Appearance" / "Languages"; arXiv "Access Paper" / "References & Citations" / "Bookmark" / "Current browse context"; top site nav (search box, login). Also exclude browser chrome (tabs, address bar) and any bottom tab strip or footer.
+
+            Output exactly one object as a JSON array:
             [{"label": "content", "bbox_2d": [x1, y1, x2, y2]}]
-
-            The bounding box should tightly enclose the reading-content region only.
             """
             requiredPanels = 1
         }

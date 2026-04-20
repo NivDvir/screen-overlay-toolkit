@@ -69,6 +69,12 @@ if #available(macOS 26.0, *) {
     GhostLayout.uiKeywords = platform.uiKeywords
     GeminiClient.shared.promptIOHint = platform.promptIOHint
     state.templateClassPatterns = platform.templateClassPatterns
+    // When PlatformConfig explicitly selects reader mode, seed forceReading early
+    // so the MCQ/coding classifier doesn't fire on the first full-screen OCR pass
+    // before the VLM returns.
+    if platform.overlayMode.layoutMode == .reader {
+        state.forceReading = true
+    }
     overlay.setStatus("Platform: \(platform.name)")
     DispatchQueue.main.async { EngineModel.shared.platformName = platform.name }
 
