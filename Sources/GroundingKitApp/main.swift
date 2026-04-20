@@ -208,12 +208,8 @@ if #available(macOS 26.0, *) {
                 state.questionScrollSignal.reset()
                 await MainActor.run {
                     overlay.clear()
-                    overlay.showPanel(
-                        PanelRect(x: contentPanel.minX, y: contentPanel.minY,
-                                  width: contentPanel.width, height: contentPanel.height,
-                                  label: "READING", paragraphCount: 0),
-                        color: "blue", label: "READING"
-                    )
+                    // Anchor the soft halo at the content panel — no hard blue frame.
+                    overlay.showReaderSummary("", nearPanel: contentPanel)
                     setStatusSegments(round: roundCount, isVLM: false, detail: "reader mode · Chrome bounds locked")
                     EngineModel.shared.vlmState = .ready
                     EngineModel.shared.questionBounds = contentPanel
@@ -338,12 +334,21 @@ if #available(macOS 26.0, *) {
                         state.questionScrollSignal.reset()
                         await MainActor.run {
                             overlay.clear()
-                            overlay.showPanel(PanelRect(x: state.questionBounds.minX, y: state.questionBounds.minY,
-                                                        width: state.questionBounds.width, height: state.questionBounds.height,
-                                                        label: "QUESTION", paragraphCount: 0), color: "blue", label: "QUESTION")
-                            overlay.showPanel(PanelRect(x: state.editorBounds.minX, y: state.editorBounds.minY,
-                                                        width: state.editorBounds.width, height: state.editorBounds.height,
-                                                        label: "EDITOR", paragraphCount: 0), color: "green", label: "EDITOR")
+                            // Reader mode uses a soft halo behind the content + the floating
+                            // summary card; skip the hard blue/green rectangular borders that
+                            // belong to two-panel test-taking layouts.
+                            if !state.forceReading {
+                                overlay.showPanel(PanelRect(x: state.questionBounds.minX, y: state.questionBounds.minY,
+                                                            width: state.questionBounds.width, height: state.questionBounds.height,
+                                                            label: "QUESTION", paragraphCount: 0), color: "blue", label: "QUESTION")
+                                overlay.showPanel(PanelRect(x: state.editorBounds.minX, y: state.editorBounds.minY,
+                                                            width: state.editorBounds.width, height: state.editorBounds.height,
+                                                            label: "EDITOR", paragraphCount: 0), color: "green", label: "EDITOR")
+                            } else {
+                                // Pre-register the anchor so the soft halo draws immediately,
+                                // even before the summary text arrives.
+                                overlay.showReaderSummary("", nearPanel: state.questionBounds)
+                            }
                             setStatusSegments(round: rnd, isVLM: true, detail: "done ✓")
                             EngineModel.shared.vlmState = .ready
                             EngineModel.shared.questionBounds = state.questionBounds
@@ -426,9 +431,13 @@ if #available(macOS 26.0, *) {
                 }
             }
 
-            // Auto-scroll: if question panel needs scrolling and no solution yet,
-            // inject a CGEvent scroll to reveal more text for the accumulator.
-            if state.questionScrollSignal.needsScrollDown && state.solution == nil {
+            // Auto-scroll: if the panel still has content below the fold and we haven't
+            // already fired the downstream action (coding solution or reader summary),
+            // inject a CGEvent scroll to reveal the next viewport for the accumulator.
+            let needsDownstreamOutput = state.questionType == .reading
+                ? state.readingSummary.isEmpty
+                : state.solution == nil
+            if state.questionScrollSignal.needsScrollDown && needsDownstreamOutput {
                 let qb = state.questionBounds
                 if qb != .zero {
                     let scrollX = qb.midX

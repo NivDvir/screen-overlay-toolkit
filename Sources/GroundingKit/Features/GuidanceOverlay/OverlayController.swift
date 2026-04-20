@@ -129,10 +129,13 @@ public class OverlayController {
     /// Reader-mode output — a floating summary card anchored next to the content panel.
     /// The card uses a translucent material so the underlying article stays readable behind it.
     /// Bullets are extracted from `•`-prefixed lines in `text`; other lines are dropped.
+    /// Passing empty `text` just updates the anchor (enables the soft halo) without
+    /// clearing an existing summary.
     public func showReaderSummary(_ text: String, nearPanel bounds: CGRect) {
-        let parsed = Self.parseBullets(from: text)
-        viewModel.summaryBullets = parsed
         viewModel.summaryAnchor = bounds
+        if !text.isEmpty {
+            viewModel.summaryBullets = Self.parseBullets(from: text)
+        }
     }
 
     public func clearReaderSummary() {
@@ -274,8 +277,41 @@ struct OverlayView: View {
                     .position(x: qb.midX, y: qb.midY)
                 }
 
-                // Reader-mode summary card — floats next to the content panel,
-                // translucent so the article stays readable behind it.
+                // Reader-mode soft halo — a whisper of navy behind the detected content
+                // that marks the region without imposing a hard rectangular frame.
+                // Appears as soon as the content anchor is known (before the summary
+                // arrives) so the visual grounding is live during the OCR / summarise
+                // phase as well.
+                if viewModel.summaryAnchor != .zero {
+                    let anchor = viewModel.summaryAnchor
+
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Self.accentNavy.opacity(0.09),
+                                    Self.accentNavy.opacity(0.035),
+                                    Color.clear,
+                                ],
+                                center: .center,
+                                startRadius: min(anchor.width, anchor.height) * 0.15,
+                                endRadius: min(anchor.width, anchor.height) * 0.78
+                            )
+                        )
+                        .frame(width: anchor.width + 32, height: anchor.height + 32)
+                        .position(x: anchor.midX, y: anchor.midY)
+                        .allowsHitTesting(false)
+
+                    // Hairline outline — drop it to 8% opacity; closer to a whisper
+                    // than a frame. Gone entirely at smaller resolutions.
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Self.accentNavy.opacity(0.10), lineWidth: 0.8)
+                        .frame(width: anchor.width, height: anchor.height)
+                        .position(x: anchor.midX, y: anchor.midY)
+                        .allowsHitTesting(false)
+                }
+
+                // Summary card — shows only once bullets have actually arrived.
                 if !viewModel.summaryBullets.isEmpty && viewModel.summaryAnchor != .zero {
                     let anchor = viewModel.summaryAnchor
                     let cardWidth: CGFloat = 360

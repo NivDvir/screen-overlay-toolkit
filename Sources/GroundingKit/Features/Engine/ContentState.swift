@@ -286,14 +286,24 @@ public class ContentState {
                     _mcqRequested = false
                     _mcqAnswer = nil
                 }
-                // Kick summarizer when we have enough accumulated text for a meaningful summary.
-                // Don't re-ask until content changes appreciably (120-char prefix hash).
+                // Gate the summarizer on having actually captured the article. Fire when:
+                //   1. the scroll signal reports no more content below (reached the end), AND
+                //   2. we have at least 400 chars accumulated (avoid summarizing a blank page),
+                //   OR we've already accumulated > 3500 chars (very long article — cap).
+                // This means the user watches the overlay do the full scroll → OCR loop
+                // before the summary appears, instead of getting a surprise summary
+                // drawn from the first visible viewport.
                 let currentHash = String(_questionText.prefix(120))
-                if !_readingRequested && _questionText.count > 200 && currentHash != _lastReadingHash {
+                let scrollDone = !questionScrollSignal.needsScrollDown
+                let enoughText = _questionText.count > 400
+                let longEnoughToCap = _questionText.count > 3500
+                let ready = (scrollDone && enoughText) || longEnoughToCap
+                if ready && !_readingRequested && currentHash != _lastReadingHash {
                     _readingRequested = true
                     _lastReadingHash = currentHash
                     let contentSnapshot = _questionText
-                    NSLog("ContentState: asking summarizer (%d chars)", contentSnapshot.count)
+                    NSLog("ContentState: asking summarizer (%d chars, scrollDone=%@)",
+                          contentSnapshot.count, scrollDone ? "yes" : "no")
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                         guard let self = self else { return }
                         if let summary = ClaudeSolver.summarize(content: contentSnapshot) {
