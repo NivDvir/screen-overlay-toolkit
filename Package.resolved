@@ -23,7 +23,7 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/NivDvir/mlx-swift-lm",
       "state" : {
-        "revision" : "9c0422238ed0ce25b86c565a3617c9c03979dac6"
+        "revision" : "095559d73e48300e22cd5a3880fcbcb8c11a40d5"
       }
     },
     {
