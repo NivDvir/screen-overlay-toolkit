@@ -30,7 +30,7 @@ let package = Package(
         // through MediaProcessing.resampleLanczos, which does match PIL and restores 0 px
         // parity with the Python reference on a 2-panel LeetCode test (2026-04-21).
         // PR #222: https://github.com/ml-explore/mlx-swift-lm/pull/222
-        .package(url: "https://github.com/NivDvir/mlx-swift-lm", revision: "42a159047ca5a1db8dd6b6f875984bdd8e2fcb3f"),
+        .package(url: "https://github.com/NivDvir/mlx-swift-lm", revision: "0bc2b777ef13be9c1b97587d73cb583d8bd45ef1"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "0.1.12"),
     ],
     targets: [
