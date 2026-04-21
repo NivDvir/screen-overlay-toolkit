@@ -126,10 +126,16 @@ public class NativePanelDetector {
     /// Run a single VLM inference and parse bbox_2d results
     private func runVLM(_ container: ModelContainer, image: CIImage, prompt: String,
                         resize: CGSize) async -> [(bbox: [Double], label: String)] {
+        // Explicit `processing: .init(resize: nil)` disables ChatSession's
+        // default 512×512 pre-resize (a sensible UX default in mlx-swift-lm
+        // that's wrong for grounding: it drops spatial detail BEFORE our
+        // PIL-matching Lanczos runs and makes our bbox output diverge from
+        // the Python mlx-vlm reference). Qwen25VL.preprocess computes its
+        // own target size from the full-resolution source.
         let session = ChatSession(
             container,
             generateParameters: .init(maxTokens: 200, temperature: 0.0),
-            processing: .init(resize: resize)
+            processing: .init(resize: nil)
         )
 
         do {
