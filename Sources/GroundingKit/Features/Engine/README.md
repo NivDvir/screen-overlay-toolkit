@@ -3,7 +3,7 @@
 The **orchestrator** — glues all other features together into the full on-screen guidance pipeline:
 
 ```
-WindowCapture → PanelDetection → OCRScrollAccumulator → SolutionGenerators → GuidanceOverlay
+WindowCapture → PanelDetection → OCRScrollAccumulator → (optional LLM adapters) → GuidanceOverlay
 ```
 
 This is what the GroundingKit app uses as its main loop. It's the least reusable feature on its own — use it if you want the full pipeline, or study it as a reference for building your own orchestrator.
@@ -12,8 +12,8 @@ This is what the GroundingKit app uses as its main loop. It's the least reusable
 
 | File | Purpose |
 |------|---------|
-| `ContentState.swift` | Thread-safe shared state across the cycle: current question text, editor contents, solution lines, typing phase, question-type (coding vs multiple-choice). Coordinates all the features. |
-| `PlatformConfig.swift` | Site-specific configuration hooks — sidebar labels, UI keywords, template class patterns, solution generator I/O hints, overlay mode. Default: `generic` platform with empty filters. |
+| `ContentState.swift` | Thread-safe shared state across the cycle: detected content bounds, accumulated text, current reader phase, forced-reading flag. Coordinates all the features. |
+| `PlatformConfig.swift` | Site-specific configuration hooks — sidebar labels to filter, UI keywords to ignore, layout mode. Default: `generic` platform with empty filters. |
 
 ## Standalone use (writing your own orchestrator)
 
@@ -24,39 +24,34 @@ let accumulator = ScrollAccumulator()
 let scrollSignal = ScrollSignal()
 let overlay = OverlayController()
 
-// 7-cycle loop (simplified)
+// Simplified cycle
 Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
     Task {
         guard let image = captureScreenExcluding(windowID: overlay.windowID) else { return }
 
         // VLM on some cycles only (expensive)
         if shouldRunVLM() {
-            if let analysis = await detector.detectPanels(from: image) {
-                state.questionBounds = analysis.questionPanel.bounds
-                state.editorBounds = analysis.editorPanel.bounds
+            if let analysis = await detector.detectPanels(from: image, mode: .reader) {
+                state.contentBounds = analysis.contentPanel.bounds
             }
         }
 
         // OCR always (cheap)
-        let scan = await OCRScanner.scanWithBounds(
+        let scan = await OCRScanner.scanPanel(
             image: image,
-            questionBounds: state.questionBounds,
-            editorBounds: state.editorBounds
+            bounds: state.contentBounds
         )
         state.update(from: scan)
-        accumulator.ingest(scan.question.lines)
+        accumulator.ingest(scan.lines)
 
-        // Scroll if needed
+        // Scroll detection (does more text exist below the fold?)
         scrollSignal.evaluate(scan: scan)
-        if scrollSignal.needsScrollDown {
-            // emit CGEvent scroll here
-        }
 
-        // Solve + render guide
-        if state.readyToCallLLM, let solution = await ClaudeSolver.solveCoding(...) {
-            state.setSolution(solution)
-            overlay.showSolutionOnQuestion(code: solution, questionBounds: state.questionBounds)
-        }
+        // Render overlay — summary card, anchor lines, annotations
+        overlay.showReaderSummary(
+            bullets: summarizeOrLoadFromCache(accumulator.stitchedText),
+            anchor: state.contentBounds
+        )
     }
 }
 ```
@@ -65,11 +60,11 @@ Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
 
 - **Internal:** all other features:
   - `../WindowCapture/` — screen capture
-  - `../PanelDetection/` — panel bboxes
-  - `../OCRScrollAccumulator/` — text extraction
-  - `../SolutionGenerators/` — LLM backends
+  - `../PanelDetection/` — content-region bboxes via Qwen2.5-VL
+  - `../OCRScrollAccumulator/` — text extraction + scroll stitching
   - `../GuidanceOverlay/` — overlay rendering
   - `../ChangeDetection/` — (optional) fast-path change gating
+  - `../SolutionGenerators/` — (optional) LLM adapters, only if your consumer wants LLM-generated overlay content
 
 ## Public API surface
 
@@ -80,5 +75,5 @@ Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
 ## Notes
 
 - **Platform config** is meant to be extended — add your own site's `PlatformConfig` (sidebar labels to filter, UI keywords to ignore, etc.) and wire `.detect()` to return it based on window title matching.
-- **7-cycle rhythm** in the reference app runs VLM sparingly (cycles 1/3/5 in round 1, cycles 1/4 in round 2, cycle 1 thereafter) since VLM is the expensive part. Your orchestrator can use a different rhythm.
+- **VLM cadence** in the reference app runs the VLM sparingly because it's the expensive stage (~15–18 s per pass on M1 Pro). The reference orchestrator uses content-panel caching so OCR can run every frame at ~300 ms while the VLM runs only when the layout changes.
 - See `Sources/GroundingKitApp/main.swift` for the full reference orchestrator.

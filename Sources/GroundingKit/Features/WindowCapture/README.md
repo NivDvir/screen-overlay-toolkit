@@ -6,7 +6,7 @@ Capture the full screen, a specific region, or a specific app's window (e.g. Chr
 
 ```swift
 // 1. Find Chrome window matching platform-specific keywords
-ChromeCapture.windowKeywords = ["LeetCode", "HackerRank"]
+ChromeCapture.windowKeywords = ["Wikipedia", "arXiv"]
 let chromeBounds = ChromeCapture.chromeBounds()  // CGRect in logical coords, .zero if not found
 
 // 2. Capture just the Chrome window

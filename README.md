@@ -1,6 +1,6 @@
 # GroundingKit
 
-![GroundingKit reader-mode demo](docs/demo.gif)
+![GroundingKit reader-mode demo](docs/reader-scroll-demo.gif)
 
 **GroundingKit is a macOS overlay that reads what's on your own screen — so you can annotate, summarize, or map long documents. All local on Apple Silicon. No cloud. No meetings, no interviews, no hidden assistance.**
 
@@ -75,7 +75,7 @@ Once permissions are granted, open a long article in Chrome (Wikipedia, arXiv, a
 ### Reader mode
 
 ```bash
-GK_READER=1 open GroundingKit.app
+GK_FORCE_READER=1 open GroundingKit.app
 ```
 
 Reader mode skips two-panel detection and treats the frontmost Chrome window as a single document panel. Intended for Wikipedia, arXiv, release notes, and long-form reading.
@@ -86,7 +86,18 @@ Reader mode skips two-panel detection and treats the frontmost Chrome window as 
 
 GroundingKit runs Qwen2.5-VL-7B-Instruct-4bit natively on Apple Silicon via [MLX](https://github.com/ml-explore/mlx). **Zero Python in the inference path.**
 
-Getting there required fixing 7 bugs in `mlx-swift-lm`'s Qwen2.5-VL implementation — ranging from a silently-dropped attention mask in the vision encoder (the biggest one) to MROPE section layout, `rope_deltas` not applied during autoregressive generation, and training-distribution mismatches in image resizing. After the fixes, Swift output matches the Python `mlx-vlm` reference at 0 px delta on all 8 bounding box edges.
+Getting there required fixing 7 bugs in `mlx-swift-lm`'s Qwen2.5-VL implementation — ranging from a silently-dropped attention mask in the vision encoder to MROPE section layout, `rope_deltas` not applied during autoregressive generation, and training-distribution mismatches in image resizing. Plus a PIL-matching Lanczos preprocessing path (Core Image's Lanczos diverges from Pillow on high-frequency content enough to shift bboxes by tens of pixels). After the fixes, Swift output matches the Python `mlx-vlm` reference at ≤ 2 px on all bbox edges — 6 of 8 bit-exact on a 2-panel test image. See [PR #222][upstream-pr] for the bug-by-bug breakdown and the parity reproducer.
+
+### A note on performance
+
+Native Swift doesn't make the model run faster. The VLM forward pass is the same Metal kernels in either language, and a one-shot `mlx-vlm` Python benchmark finishes within a few percent of the Swift equivalent. What Swift changes is everything *around* the model:
+
+- **Cold start ~3 s vs ~15 s** — no interpreter, no PyTorch import, just mmap the weights.
+- **Zero-IPC pipeline** — `CGWindowListCreateImage` → VLM → `VNRecognizeTextRequest` → Metal overlay all run in one process with shared memory. A Python pipeline has to serialize each screenshot across the subprocess boundary, adding 30–100 ms per cycle on top of inference.
+- **Real-time frame work becomes viable** — a per-frame 16 ms budget has room for actual OCR and overlay redraw; it doesn't fit a round-trip to a Python worker.
+- **Bounded memory over long sessions** — `autoreleasepool` around CGImage ops keeps a 100-minute session at ~5.5 GB peak; an equivalent Python subprocess path leaks ~900 MB over the same duration through PyObjC bridging.
+
+The headline inference number is the same either way. The difference is whether you can wrap that around a responsive app.
 
 The fixes live on a fork of `mlx-swift-lm` pinned via `Package.swift`:
 
@@ -105,7 +116,7 @@ If `#222` gets merged upstream, `Package.swift` will be repointed to `ml-explore
 Organized by **feature**, not by layer. Each folder under `Sources/GroundingKit/Features/` is self-contained — copy just that folder into another project to reuse the capability.
 
 ```
-GroundingKit-axvs-clone/
+screen-overlay-toolkit/
 ├── README.md                 # this file
 ├── BUILD_NOTES.md            # mlx-swift-lm fork dependency notes
 ├── Package.swift             # SPM config (points at NivDvir/mlx-swift-lm fork)
@@ -117,7 +128,6 @@ GroundingKit-axvs-clone/
 │   │   ├── PanelDetection/          # Qwen2.5-VL grounding (+ README)
 │   │   ├── OCRScrollAccumulator/    # Vision OCR + scroll-stitching (+ README)
 │   │   ├── GuidanceOverlay/         # draw markers on screen (+ README)
-│   │   ├── SolutionGenerators/      # Claude CLI, Gemini wrappers (+ README)
 │   │   ├── ChangeDetection/         # pixel-diff change detection (+ README)
 │   │   └── Engine/                  # orchestrator + shared state (+ README)
 │   └── GroundingKitApp/             # the shipped macOS app = reference consumer
