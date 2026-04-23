@@ -28,6 +28,269 @@ func captureScreenExcluding(windowID: CGWindowID) -> CGImage? {
     CGWindowListCreateImage(CGRect.infinite, .optionOnScreenBelowWindow, windowID, [.bestResolution])
 }
 
+/// Find the title (h1-style heading) and body anchors by looking at the
+/// SCREEN VIEW — the same grounding substrate the rest of the app uses.
+/// Pipeline: VLM (.reader mode) picks the main article column, then
+/// Vision-framework OCR inside that column identifies the title as the
+/// top-most line with distinctly larger font. Remaining column area
+/// below the title is the body anchor. Works on any on-screen content,
+/// no DOM / AppleScript access required — matches the same grounding
+/// substrate that PR #222 hardened.
+///
+/// NOTE: `queryWikipediaAnchors` below (kept for reference) uses Chrome\'s
+/// DOM to get the exact pixel bounds from the page source. It\'s a TEST
+/// ORACLE only — useful for verifying that the VLM + OCR path returns
+/// matching rects when the DOM truth is available. Not used in the demo.
+/// Cache the one-time VLM .reader detection so per-frame grounding only pays
+/// the fast Vision-OCR cost. VLM is 5-15s, OCR is 300-500ms, so caching lets
+/// the overlay track scroll in near-real-time (2+ Hz).
+actor ContentPanelCache {
+    private var panel: CGRect = .zero
+    private var lastChrome: CGRect = .zero
+
+    func get(forChrome chrome: CGRect) -> CGRect? {
+        if panel != .zero && lastChrome == chrome { return panel }
+        return nil
+    }
+    func set(_ rect: CGRect, forChrome chrome: CGRect) {
+        panel = rect
+        lastChrome = chrome
+    }
+    func invalidate() {
+        panel = .zero
+    }
+}
+let contentPanelCache = ContentPanelCache()
+
+@available(macOS 26.0, *)
+func findTitleAndBodyAnchors(
+    screen: CGImage, detector: NativePanelDetector
+) async -> (title: CGRect, body: CGRect)? {
+    let cycleStart = CFAbsoluteTimeGetCurrent()
+    let chrome = ChromeCapture.chromeBounds()
+    // Fast path. If we have a cached content panel for the current Chrome
+    // window, skip VLM and go straight to OCR.
+    var contentPanel: CGRect
+    var usedVLM = false
+    if let cached = await contentPanelCache.get(forChrome: chrome), cached != .zero {
+        contentPanel = cached
+    } else {
+        // VLM needs to see ONLY the Chrome window, not the whole desktop
+        // (with Terminal, Finder, etc.), otherwise its panel detection gets
+        // confused by multiple content-like regions. Crop the screen capture
+        // to the Chrome window rect. The CGImage is in RETINA pixels but
+        // Chrome bounds are in LOGICAL points — convert via the scale factor.
+        let retinaScale = CGFloat(screen.width) / (NSScreen.main?.frame.width ?? CGFloat(screen.width))
+        let cropRect: CGRect
+        if chrome != .zero && retinaScale > 0 {
+            cropRect = CGRect(
+                x: chrome.minX * retinaScale,
+                y: chrome.minY * retinaScale,
+                width: chrome.width * retinaScale,
+                height: chrome.height * retinaScale
+            )
+        } else {
+            cropRect = CGRect(x: 0, y: 0, width: CGFloat(screen.width), height: CGFloat(screen.height))
+        }
+        let cropped = screen.cropping(to: cropRect) ?? screen
+        guard let analysis = await detector.detectPanels(from: cropped, mode: .reader) else {
+            NSLog("findTitleAndBodyAnchors: VLM did not return a content panel")
+            return nil
+        }
+        // VLM output is in the CROPPED image's coord space. Translate back to
+        // screen coords by adding the Chrome window origin.
+        let croppedPanel = analysis.questionPanel.bounds
+        if chrome != .zero {
+            contentPanel = CGRect(
+                x: croppedPanel.minX + chrome.minX,
+                y: croppedPanel.minY + chrome.minY,
+                width: croppedPanel.width,
+                height: croppedPanel.height
+            )
+        } else {
+            contentPanel = croppedPanel
+        }
+        await contentPanelCache.set(contentPanel, forChrome: chrome)
+        usedVLM = true
+        NSLog("findTitleAndBodyAnchors: VLM content panel %.0fx%.0f at (%.0f,%.0f) [cropped Chrome %.0fx%.0f]",
+              contentPanel.width, contentPanel.height, contentPanel.minX, contentPanel.minY,
+              chrome.width, chrome.height)
+    }
+
+    // Extend the content panel UPWARD by ~80pt so Vision OCR can see the
+    // article H1 heading, which VLM typically classifies into the "header"
+    // region above the content column. Without this extension, the title
+    // detector never sees the H1 as an OCR line.
+    let ocrPanel = CGRect(
+        x: contentPanel.minX,
+        y: max(chrome.minY + 100, contentPanel.minY - 80),
+        width: contentPanel.width,
+        height: contentPanel.height + (contentPanel.minY - max(chrome.minY + 100, contentPanel.minY - 80))
+    )
+    // Per-frame Vision OCR inside the extended cached panel — fast, stable.
+    guard let panel = await OCRScanner.scanPanel(
+        image: screen, panelBounds: ocrPanel, label: "CONTENT"
+    ), !panel.lines.isEmpty else {
+        NSLog("findTitleAndBodyAnchors: OCR returned no lines; invalidating panel cache")
+        await contentPanelCache.invalidate()
+        return nil
+    }
+
+    // Title detection. A real H1 has a distinct signature on any article-
+    // style page: SHORT text (usually < 60 chars, often a few words), near
+    // the top of the content column, AND significantly taller than body
+    // text (>= 1.8x the 25th-percentile body height). Body paragraphs are
+    // LONG (wrapping across many words) and shouldn't be confused for
+    // titles.
+    let sortedHeights = panel.lines.map { $0.bounds.height }.sorted()
+    let q25Index = max(0, sortedHeights.count / 4)
+    let q25Height = sortedHeights[q25Index]
+    let sortedByY = panel.lines.sorted { $0.bounds.minY < $1.bounds.minY }
+    // Log the first few OCR lines for diagnosis.
+    for (idx, ln) in sortedByY.prefix(6).enumerated() {
+        NSLog("  OCRline[%d] h=%.0f w=%.0f chars=%d text='%@'",
+              idx, ln.bounds.height, ln.bounds.width,
+              ln.text.count, String(ln.text.prefix(60)))
+    }
+    // Title candidate: top-most line that looks like a heading.
+    //   - length cap 140 chars per-line (each line of a wrapped title stays
+    //     well within this even for very long article titles)
+    //   - height >= 1.8x the 25th-percentile body height (distinctive;
+    //     reliably separates real headings from body paragraphs)
+    //   - minimum width 80pt (not a tiny badge)
+    // NO upper width bound — a real H1 can legitimately wrap to the full
+    // column width; the height threshold is what distinguishes title from
+    // body on any article-style page.
+    let titleCandidate = sortedByY.first { line in
+        line.text.count <= 140 &&
+        line.bounds.height >= q25Height * 1.8 &&
+        line.bounds.width >= 80
+    }
+    guard let titleLine = titleCandidate else {
+        NSLog("findTitleAndBodyAnchors: no title candidate in visible OCR; title anchor nil")
+        // Still return a body anchor (full content panel) so the navy card
+        // can remain even when the H1 has scrolled out of view.
+        let cycleMs = (CFAbsoluteTimeGetCurrent() - cycleStart) * 1000
+        NSLog("findTitleAndBodyAnchors: cycle=%.0fms VLM=%@ title=NIL body only",
+              cycleMs, usedVLM ? "Y" : "N")
+        return (.zero, contentPanel)
+    }
+    let titleRect = titleLine.bounds.insetBy(dx: -8, dy: -6)
+
+    // Body X-cluster. OCR lines can leak outside the VLM panel occasionally.
+    // Tighten body rect to the X-range where most (>=60%) body lines sit.
+    let bodyLines = panel.lines.filter { $0.bounds.minY > titleRect.maxY }
+    let bodyXs = bodyLines.map { $0.bounds.minX }.sorted()
+    let bodyEnds = bodyLines.map { $0.bounds.maxX }.sorted()
+    let tightLeft: CGFloat
+    let tightRight: CGFloat
+    if bodyXs.count >= 3, bodyEnds.count >= 3 {
+        tightLeft = bodyXs[bodyXs.count / 4]
+        tightRight = bodyEnds[3 * bodyEnds.count / 4]
+    } else {
+        tightLeft = contentPanel.minX
+        tightRight = contentPanel.maxX
+    }
+    let bodyTop = titleRect.maxY + 12
+    let bodyRect = CGRect(
+        x: tightLeft - 6,
+        y: bodyTop,
+        width: max(280, tightRight - tightLeft + 12),
+        height: max(200, contentPanel.maxY - bodyTop)
+    )
+
+    let cycleMs = (CFAbsoluteTimeGetCurrent() - cycleStart) * 1000
+    NSLog("findTitleAndBodyAnchors: cycle=%.0fms VLM=%@ title='%@' titleH=%.0f q25H=%.0f bodyW=%.0f",
+          cycleMs, usedVLM ? "Y" : "N", titleLine.text, titleRect.height, q25Height, bodyRect.width)
+    return (titleRect, bodyRect)
+}
+
+/// Query Chrome's active tab for the current absolute scroll position in
+/// pixels. Used to drive progressive bullet reveal in the demo: bullets
+/// unlock as the user scrolls past their corresponding content. Returns
+/// scrollTop in pixels, or nil if query fails. DOM query is acceptable
+/// here because this drives DEMO-SIDE state (what to show), not the
+/// grounding anchors — those still come from the screen-view VLM+OCR
+/// pipeline.
+func chromeScrollPixels() -> Double? {
+    let js = "(function(){var s=document.scrollingElement||document.documentElement;return s.scrollTop.toFixed(0);})()"
+    let escaped = js.replacingOccurrences(of: "\"", with: "\\\"")
+    let apple = "tell application \"Google Chrome\" to return execute front window's active tab javascript \"\(escaped)\""
+    let t = Process()
+    t.launchPath = "/usr/bin/osascript"
+    t.arguments = ["-e", apple]
+    let pipe = Pipe(); t.standardOutput = pipe; t.standardError = Pipe()
+    do { try t.run() } catch { return nil }
+    t.waitUntilExit()
+    let s = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return s.flatMap { Double($0) }
+}
+
+/// TEST ORACLE ONLY. Queries Chrome\'s DOM for exact H1 and body bounds.
+/// Useful to validate that `findTitleAndBodyAnchors` (the VLM+OCR screen-view
+/// grounding) returns matching rects when ground truth is available via a
+/// scriptable browser. Not used in the production demo path.
+func queryWikipediaAnchors(chromeBounds: CGRect) -> (CGRect, CGRect) {
+    let js = """
+    (function(){
+      var h = document.querySelector('h1#firstHeading') || document.querySelector('h1');
+      var c = document.querySelector('#mw-content-text') || document.querySelector('main') || document.body;
+      if (!h || !c) return '';
+      var hb = h.getBoundingClientRect();
+      var cb = c.getBoundingClientRect();
+      var vw = window.innerWidth, vh = window.innerHeight;
+      return Math.round(hb.left)+','+Math.round(hb.top)+','+Math.round(hb.width)+','+Math.round(hb.height)
+           +'|'+Math.round(cb.left)+','+Math.round(cb.top)+','+Math.round(cb.width)+','+Math.round(cb.height)
+           +'|'+vw+','+vh;
+    })()
+    """
+    let escapedJS = js.replacingOccurrences(of: "\"", with: "\\\"")
+    let apple = "tell application \"Google Chrome\" to return execute front window's active tab javascript \"\(escapedJS)\""
+    let task = Process()
+    task.launchPath = "/usr/bin/osascript"
+    task.arguments = ["-e", apple]
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = Pipe()
+    do { try task.run() } catch {
+        return fallbackAnchors(chromeBounds: chromeBounds)
+    }
+    task.waitUntilExit()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    guard let result = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !result.isEmpty else {
+        return fallbackAnchors(chromeBounds: chromeBounds)
+    }
+    let parts = result.split(separator: "|").map { String($0) }
+    guard parts.count >= 3 else { return fallbackAnchors(chromeBounds: chromeBounds) }
+    func parseRect(_ s: String) -> CGRect? {
+        let nums = s.split(separator: ",").compactMap { Double($0) }
+        guard nums.count == 4 else { return nil }
+        return CGRect(x: nums[0], y: nums[1], width: nums[2], height: nums[3])
+    }
+    guard let headerViewport = parseRect(parts[0]),
+          let bodyViewport = parseRect(parts[1]) else {
+        return fallbackAnchors(chromeBounds: chromeBounds)
+    }
+    let vdims = parts[2].split(separator: ",").compactMap { Double($0) }
+    let viewportHeight = vdims.count >= 2 ? vdims[1] : Double(chromeBounds.height - 121)
+    let topInset = chromeBounds.height - CGFloat(viewportHeight)
+    let oX = chromeBounds.minX, oY = chromeBounds.minY + topInset
+    let header = CGRect(x: oX + headerViewport.minX, y: oY + headerViewport.minY,
+                        width: headerViewport.width, height: headerViewport.height)
+    let bh = min(bodyViewport.height, CGFloat(viewportHeight) - bodyViewport.minY - 8)
+    let body = CGRect(x: oX + bodyViewport.minX, y: oY + bodyViewport.minY,
+                      width: bodyViewport.width, height: max(200, bh))
+    return (header, body)
+}
+
+private func fallbackAnchors(chromeBounds: CGRect) -> (CGRect, CGRect) {
+    let b = chromeBounds
+    return (CGRect(x: b.minX + 280, y: b.minY + 200, width: 700, height: 50),
+            CGRect(x: b.minX + 280, y: b.minY + 300, width: 820, height: 420))
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)  // menu-bar app: no dock icon
 
@@ -95,6 +358,83 @@ if #available(macOS 26.0, *) {
             await MainActor.run {
                 overlay.setStatus("❌ VLM: \(error.localizedDescription)")
                 EngineModel.shared.vlmState = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    // GK_TWO_SPOT_DEMO — experiment: show two framing-projector cards on the
+    // same page, lighting different regions. Uses Chrome window geometry for
+    // deterministic rects. Re-injects every 3s so the normal reader-mode
+    // Claude path can't overwrite our two-spot state.
+    let isTwoSpotDemo = ProcessInfo.processInfo.environment["GK_TWO_SPOT_DEMO"] == "1"
+    if isTwoSpotDemo {
+        // Full bullet list for the "Whole article" card. Each entry has an
+        // unlock threshold: the fraction of total article height the user
+        // must have scrolled past for that bullet to appear on the card.
+        // This models "summary appears AFTER its content has been exposed."
+        struct ProgressiveBullet { let text: String; let unlockPx: Double }
+        let bodyBullets: [ProgressiveBullet] = [
+            .init(text: "Apple Silicon: SoC family across Mac, iPhone, iPad", unlockPx: 0),
+            .init(text: "M-series (Mac) and A-series (mobile) share one design ethos", unlockPx: 400),
+            .init(text: "Unified memory: CPU / GPU / Neural Engine share RAM", unlockPx: 1200),
+            .init(text: "Replaced Intel x86 in Mac starting 2020 (M1 transition)", unlockPx: 2400),
+            .init(text: "ARM-based, designed in-house, fabricated by TSMC", unlockPx: 4000),
+        ]
+
+        NSLog("GK_TWO_SPOT_DEMO: env var detected; scheduling demo task")
+        Task.detached {
+            NSLog("GK_TWO_SPOT_DEMO: task started — sleeping 12s for VLM load + first panel detect")
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            NSLog("GK_TWO_SPOT_DEMO: entering main loop")
+            while true {
+                let screenImage: CGImage? = autoreleasepool {
+                    captureScreenExcluding(windowID: CGWindowID(overlay.windowNumber))
+                }
+                if let screenImage = screenImage,
+                   let anchors = await findTitleAndBodyAnchors(screen: screenImage, detector: detector) {
+                    let titleRect = anchors.title
+                    let bodyRect = anchors.body
+                    // Scroll percentage drives progressive bullet reveal.
+                    // Defaults to 0 (only the first bullet) if DOM query fails —
+                    // safe fallback; the VLM+OCR path is unchanged either way.
+                    let scrollPx = chromeScrollPixels() ?? 0.0
+                    let unlocked = bodyBullets.filter { $0.unlockPx <= scrollPx }.map { $0.text }
+                    NSLog("GK_TWO_SPOT_DEMO: scroll=%.0fpx bullets unlocked=%d/%d",
+                          scrollPx, unlocked.count, bodyBullets.count)
+
+                    await MainActor.run {
+                        var spots: [SpotlightItem] = []
+                        // Body card — always shown while content is visible.
+                        // Bullets accumulate as user scrolls.
+                        spots.append(SpotlightItem(
+                            anchor: bodyRect,
+                            bullets: unlocked.isEmpty ? ["…reading the article…"] : unlocked,
+                            hueIndex: 0,
+                            title: "Whole article"
+                        ))
+                        // Title card — only shown while the H1 heading is
+                        // actually visible in the viewport. findTitle… returns
+                        // a zero rect when no OCR line satisfies the title
+                        // heuristic (H1 scrolled out of view).
+                        if titleRect != .zero &&
+                           titleRect.minY > 0 &&
+                           titleRect.maxY < CGFloat(screenImage.height) {
+                            spots.append(SpotlightItem(
+                                anchor: titleRect,
+                                bullets: [
+                                    "Article heading currently visible on screen",
+                                    "Scope: what the article is about",
+                                ],
+                                hueIndex: 1,
+                                title: "Title / scope"
+                            ))
+                        }
+                        overlay.setSpotlights(spots)
+                    }
+                } else {
+                    NSLog("GK_TWO_SPOT_DEMO: grounding failed this cycle, retrying")
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
     }
@@ -209,7 +549,10 @@ if #available(macOS 26.0, *) {
                 await MainActor.run {
                     overlay.clear()
                     // Anchor the soft halo at the content panel — no hard blue frame.
-                    overlay.showReaderSummary("", nearPanel: contentPanel)
+                    // Skip when two-spot demo is driving; it injects its own spotlights.
+                    if !isTwoSpotDemo {
+                        overlay.showReaderSummary("", nearPanel: contentPanel)
+                    }
                     setStatusSegments(round: roundCount, isVLM: false, detail: "reader mode · Chrome bounds locked")
                     EngineModel.shared.vlmState = .ready
                     EngineModel.shared.questionBounds = contentPanel
@@ -344,7 +687,7 @@ if #available(macOS 26.0, *) {
                                 overlay.showPanel(PanelRect(x: state.editorBounds.minX, y: state.editorBounds.minY,
                                                             width: state.editorBounds.width, height: state.editorBounds.height,
                                                             label: "EDITOR", paragraphCount: 0), color: "green", label: "EDITOR")
-                            } else {
+                            } else if !isTwoSpotDemo {
                                 // Pre-register the anchor so the soft halo draws immediately,
                                 // even before the summary text arrives.
                                 overlay.showReaderSummary("", nearPanel: state.questionBounds)
@@ -482,13 +825,15 @@ if #available(macOS 26.0, *) {
                     //   Stage 3 (summary): floating summary card anchored next to the panel
                     let summary = state.readingSummary
                     let charCount = state.questionText.count
+                    NSLog("Reader route: summaryLen=%d charCount=%d questionBounds=%.0fx%.0f",
+                          summary.count, charCount, state.questionBounds.width, state.questionBounds.height)
                     if !summary.isEmpty && state.questionBounds != .zero {
                         // Stage 3 — floating summary card (elegant, non-intrusive)
                         overlay.showCollectingBoxes([])
                         overlay.setQuestionPanelBlinking(false)
                         // The solution-on-panel overlay is cleared so only the floating card is visible
                         overlay.showSolutionOnQuestion(code: "", questionBounds: .zero)
-                        if !diagnosticHideOverlay {
+                        if !diagnosticHideOverlay && !isTwoSpotDemo {
                             overlay.showReaderSummary(summary, nearPanel: state.questionBounds)
                         }
                         let bulletCount = summary.components(separatedBy: "\n").filter { $0.contains("•") }.count

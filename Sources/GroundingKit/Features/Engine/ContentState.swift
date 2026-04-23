@@ -222,8 +222,12 @@ public class ContentState {
                 } else {
                     _questionText = questionAccumulator.fullText
                 }
-                // Only update bounds from bounded scans — VLM sets initial bounds
-                if isBounded {
+                // Only update bounds from bounded scans — VLM sets initial bounds.
+                // In reader mode keep the force-reader bounds (derived from Chrome
+                // window geometry, not from OCR line clusters); otherwise each
+                // `scanFull` cycle would shrink the content rect to whatever the
+                // X-cluster detected, which drifts as the user scrolls.
+                if isBounded && !_forceReading {
                     _questionBounds = q.bounds
                 }
 

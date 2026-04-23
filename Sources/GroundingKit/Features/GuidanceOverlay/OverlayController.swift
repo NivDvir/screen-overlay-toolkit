@@ -1,6 +1,29 @@
 import AppKit
 import SwiftUI
 
+/// Wraps `NSVisualEffectView` as a SwiftUI view so the reader-mode spotlight
+/// dim can use real macOS material (blurred backdrop of whatever window sits
+/// behind the overlay — Chrome / VS Code / etc.) instead of a flat color.
+/// `.behindWindow` blending means NSVisualEffectView blurs what's behind the
+/// overlay window, not what's inside it; safe on a transparent overlay.
+struct MaterialBackdrop: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = blendingMode
+        v.state = .active
+        v.isEmphasized = true
+        return v
+    }
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
+    }
+}
+
 /// A detected text block from Vision OCR.
 struct TextBlock: Identifiable {
     let id = UUID()
@@ -126,21 +149,50 @@ public class OverlayController {
         viewModel.questionBounds = questionBounds
     }
 
-    /// Reader-mode output — a floating summary card anchored next to the content panel.
-    /// The card uses a translucent material so the underlying article stays readable behind it.
-    /// Bullets are extracted from `•`-prefixed lines in `text`; other lines are dropped.
-    /// Passing empty `text` just updates the anchor (enables the soft halo) without
-    /// clearing an existing summary.
+    /// Reader-mode output — a floating summary card anchored next to the content panel,
+    /// with the framing-projector light effect on the content itself. Bullets are
+    /// extracted from `•`-prefixed lines in `text`; other lines are dropped. Passing
+    /// empty `text` just updates the anchor (light lands immediately) without clearing
+    /// an existing summary. Internally this becomes a single-item `spotlights` list.
     public func showReaderSummary(_ text: String, nearPanel bounds: CGRect) {
+        NSLog("Overlay: showReaderSummary textLen=%d anchor=%.0fx%.0f at (%.0f,%.0f)",
+              text.count, bounds.width, bounds.height, bounds.minX, bounds.minY)
         viewModel.summaryAnchor = bounds
+        let bullets: [String]
         if !text.isEmpty {
-            viewModel.summaryBullets = Self.parseBullets(from: text)
+            bullets = Self.parseBullets(from: text)
+            viewModel.summaryBullets = bullets
+        } else {
+            bullets = viewModel.summaryBullets
+        }
+        // Mirror into spotlights so the batched renderer uses a single code path.
+        viewModel.spotlights = [
+            SpotlightItem(anchor: bounds, bullets: bullets, hueIndex: 0)
+        ]
+    }
+
+    /// Multi-spotlight API: set any number of lighting cards at once. Each
+    /// item lights a different region. Used to show e.g. one card about the
+    /// whole document + another about a specific header, simultaneously.
+    public func setSpotlights(_ items: [SpotlightItem]) {
+        NSLog("Overlay: setSpotlights count=%d", items.count)
+        viewModel.spotlights = items
+        // Keep legacy single-anchor state in sync with the first item so the
+        // rest of the app's reader-mode paths (status segments, accumulator
+        // checks) still see a non-zero anchor.
+        if let first = items.first {
+            viewModel.summaryAnchor = first.anchor
+            viewModel.summaryBullets = first.bullets
+        } else {
+            viewModel.summaryAnchor = .zero
+            viewModel.summaryBullets = []
         }
     }
 
     public func clearReaderSummary() {
         viewModel.summaryBullets = []
         viewModel.summaryAnchor = .zero
+        viewModel.spotlights = []
     }
 
     private static func parseBullets(from text: String) -> [String] {
@@ -166,6 +218,37 @@ public struct StatusSegment {
 }
 
 /// Observable view model — bridges detection results to SwiftUI.
+/// A single framing-projector spot: a rectangular region on screen that
+/// receives "projected light" from a companion summary card. Multiple spots
+/// can coexist — each one lights a different region whose content is what
+/// the card is talking about.
+public struct SpotlightItem: Identifiable, Equatable {
+    /// Stable string identity — must be the same across re-injections so
+    /// SwiftUI ForEach doesn't re-run the insertion animation every time a
+    /// consumer calls `setSpotlights` with fresh arrays. Default derives an
+    /// id from the title (if set) and hue index; callers driving a dynamic
+    /// list should pass explicit stable ids.
+    public let id: String
+    /// Screen-space rect that should be illuminated.
+    public let anchor: CGRect
+    /// Bullet text shown in the card.
+    public let bullets: [String]
+    /// Index into `OverlayView.spotlightPalette`. Different index = different
+    /// hue, so a viewer can pair card ↔ region at a glance.
+    public let hueIndex: Int
+    /// Optional title for the card (shows above bullets).
+    public let title: String?
+
+    public init(id: String? = nil, anchor: CGRect, bullets: [String],
+                hueIndex: Int, title: String? = nil) {
+        self.id = id ?? "\(hueIndex):\(title ?? "spot")"
+        self.anchor = anchor
+        self.bullets = bullets
+        self.hueIndex = hueIndex
+        self.title = title
+    }
+}
+
 class OverlayViewModel: ObservableObject {
     struct PanelDisplay {
         let rect: PanelRect
@@ -185,10 +268,14 @@ class OverlayViewModel: ObservableObject {
     @Published var collectingBoxes: [CGRect] = []
     /// Whether the question panel border should blink (Stage 2: waiting for Claude)
     @Published var questionPanelBlinking: Bool = false
-    /// Reader-mode summary bullets (card floats next to content panel)
+    /// Reader-mode summary bullets (card floats next to content panel) —
+    /// kept for backwards compatibility. Internally mirrored into `spotlights`.
     @Published var summaryBullets: [String] = []
     /// Panel the summary card should anchor next to
     @Published var summaryAnchor: CGRect = .zero
+    /// List of active spotlight + card pairs. Rendered as a batch so the
+    /// ambient dim has one mask with multiple cutouts.
+    @Published var spotlights: [SpotlightItem] = []
     /// Brief flash text for corner triggers (reset, screenshot escalation)
     @Published var cornerFlash: String = ""
 }
@@ -277,74 +364,124 @@ struct OverlayView: View {
                     .position(x: qb.midX, y: qb.midY)
                 }
 
-                // Reader-mode: draw 4 sharp perspective lines connecting the summary
-                // card's corners to the content region's corners — a visual frustum
-                // that grounds "this small summary refers to that larger section".
-                // Plus a hairline content outline for reference.
-                if !viewModel.summaryBullets.isEmpty && viewModel.summaryAnchor != .zero {
-                    let anchor = viewModel.summaryAnchor
+                // Reader-mode spotlights — framing-projector metaphor. Each
+                // summary card is a small LED projector; the content behind
+                // it is the artwork; the card's light shapes to the exact
+                // perimeter of its spot so the spot reads as "radiating
+                // from within." Multiple spots can coexist on screen, each
+                // lighting a different region with its own hue from the
+                // palette. Layer composition per-spot: (1) combined ambient
+                // dim with holes for all spots; (2) inner luminosity;
+                // (3) hue wash; (4) warm edge wash; (5) crisp shutter-cut rim.
+                if !viewModel.spotlights.isEmpty {
+                    let cornerRadius: CGFloat = 18
+                    let maskFeather: CGFloat = 26
+                    let anySpotHasCard = viewModel.spotlights.contains { !$0.bullets.isEmpty }
 
-                    // Card geometry — same as the rendered card below
-                    let cardWidth: CGFloat = 360
-                    let cardHeight: CGFloat = estimatedCardHeight(for: viewModel.summaryBullets)
-                    let rightEdge = min(anchor.maxX - 18, screenW - 18)
-                    let cardCenterX = rightEdge - cardWidth / 2
-                    let cardCenterY = anchor.minY + 230
-                    let cardRect = CGRect(
-                        x: cardCenterX - cardWidth / 2,
-                        y: cardCenterY - cardHeight / 2,
-                        width: cardWidth,
-                        height: cardHeight
-                    )
-
-                    // Four corner-to-corner lines
-                    Path { p in
-                        p.move(to: CGPoint(x: anchor.minX, y: anchor.minY)); p.addLine(to: CGPoint(x: cardRect.minX, y: cardRect.minY))
-                        p.move(to: CGPoint(x: anchor.maxX, y: anchor.minY)); p.addLine(to: CGPoint(x: cardRect.maxX, y: cardRect.minY))
-                        p.move(to: CGPoint(x: anchor.minX, y: anchor.maxY)); p.addLine(to: CGPoint(x: cardRect.minX, y: cardRect.maxY))
-                        p.move(to: CGPoint(x: anchor.maxX, y: anchor.maxY)); p.addLine(to: CGPoint(x: cardRect.maxX, y: cardRect.maxY))
-                    }
-                    .stroke(
-                        LinearGradient(
-                            colors: [Self.accentNavy.opacity(0.60), Self.accentNavy.opacity(0.18)],
-                            startPoint: .topLeading, endPoint: .bottomTrailing
-                        ),
-                        style: StrokeStyle(lineWidth: 1.0, lineCap: .round)
-                    )
-                    .allowsHitTesting(false)
-
-                    // Corner dots at the 4 anchor corners to mark the endpoints
-                    ForEach(0..<4, id: \.self) { i in
-                        let p: CGPoint = {
-                            switch i {
-                            case 0: return CGPoint(x: anchor.minX, y: anchor.minY)
-                            case 1: return CGPoint(x: anchor.maxX, y: anchor.minY)
-                            case 2: return CGPoint(x: anchor.minX, y: anchor.maxY)
-                            default: return CGPoint(x: anchor.maxX, y: anchor.maxY)
+                    // (1) Combined ambient dim — stronger so the surrounding
+                    // area is clearly "offstage." Single mask with per-spot
+                    // cutouts so overlapping dims don't stack.
+                    Rectangle()
+                        .fill(Color.black.opacity(anySpotHasCard ? 0.42 : 0.20))
+                        .mask {
+                            ZStack {
+                                Color.white
+                                ForEach(viewModel.spotlights, id: \.id) { spot in
+                                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                        .frame(width: spot.anchor.width, height: spot.anchor.height)
+                                        .position(x: spot.anchor.midX, y: spot.anchor.midY)
+                                        .blendMode(.destinationOut)
+                                }
                             }
-                        }()
-                        Circle()
-                            .fill(Self.accentNavy.opacity(0.70))
-                            .frame(width: 5, height: 5)
-                            .position(p)
-                            .allowsHitTesting(false)
-                    }
-
-                    // Hairline around the anchor region — 14% opacity, for reference only
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(Self.accentNavy.opacity(0.14), lineWidth: 0.8)
-                        .frame(width: anchor.width, height: anchor.height)
-                        .position(x: anchor.midX, y: anchor.midY)
+                            .compositingGroup()
+                            .blur(radius: maskFeather)
+                        }
                         .allowsHitTesting(false)
 
-                    // The summary card itself
-                    summaryCard(bullets: viewModel.summaryBullets, width: cardWidth)
-                        .position(x: cardCenterX, y: cardCenterY)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .trailing).combined(with: .opacity),
-                            removal: .opacity
-                        ))
-                        .animation(.spring(response: 0.35, dampingFraction: 0.78), value: viewModel.summaryBullets.count)
+                    // (2–6) Per-spot outer halo, inner glow, hue wash, edge
+                    // wash, crisp rim.
+                    ForEach(viewModel.spotlights, id: \.id) { spot in
+                        let a = spot.anchor
+                        let hasCard = !spot.bullets.isEmpty
+                        let hue = Self.spotlightPalette[spot.hueIndex % Self.spotlightPalette.count]
+
+                        // (2) Outer halo — wide blurred hue stroke OUTSIDE the
+                        // rect. Makes the illuminated region read as "lit up"
+                        // even on content that already has high luminance.
+                        RoundedRectangle(cornerRadius: cornerRadius + 10, style: .continuous)
+                            .strokeBorder(hue.opacity(hasCard ? 0.60 : 0.32), lineWidth: 24)
+                            .blur(radius: 24)
+                            .frame(width: a.width + 20, height: a.height + 20)
+                            .position(x: a.midX, y: a.midY)
+                            .allowsHitTesting(false)
+
+                        // (3) Radiating-from-within — inner luminosity
+                        RoundedRectangle(cornerRadius: cornerRadius - 2, style: .continuous)
+                            .fill(
+                                RadialGradient(
+                                    colors: [
+                                        Color.white.opacity(hasCard ? 0.22 : 0.10),
+                                        Color.white.opacity(hasCard ? 0.10 : 0.04),
+                                        Color.clear,
+                                    ],
+                                    center: UnitPoint(x: 0.5, y: 0.42),
+                                    startRadius: 0,
+                                    endRadius: max(a.width, a.height) * 0.65
+                                )
+                            )
+                            .frame(width: a.width - 2, height: a.height - 2)
+                            .position(x: a.midX, y: a.midY)
+                            .blendMode(.plusLighter)
+                            .allowsHitTesting(false)
+
+                        // (4) Hue wash — per-spot color identity
+                        RoundedRectangle(cornerRadius: cornerRadius - 2, style: .continuous)
+                            .fill(hue.opacity(hasCard ? 0.15 : 0.06))
+                            .frame(width: a.width - 2, height: a.height - 2)
+                            .position(x: a.midX, y: a.midY)
+                            .blendMode(.plusLighter)
+                            .allowsHitTesting(false)
+
+                        // (5) Warm edge wash — inside the frame edge
+                        RoundedRectangle(cornerRadius: cornerRadius - 1, style: .continuous)
+                            .strokeBorder(Color.white.opacity(hasCard ? 0.32 : 0.14), lineWidth: 5)
+                            .blur(radius: 6)
+                            .frame(width: a.width - 2, height: a.height - 2)
+                            .position(x: a.midX, y: a.midY)
+                            .blendMode(.plusLighter)
+                            .allowsHitTesting(false)
+
+                        // (6) Crisp shutter-cut rim
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(hue.opacity(hasCard ? 0.85 : 0.50), lineWidth: 2.4)
+                            .frame(width: a.width, height: a.height)
+                            .position(x: a.midX, y: a.midY)
+                            .allowsHitTesting(false)
+                    }
+                }
+
+                // Per-spot summary cards — one card per SpotlightItem.
+                // A framing projector sits BESIDE the artwork it lights, never
+                // on top of it — so the card must NEVER overlap its own anchor
+                // rect. Placement logic:
+                //   1. Try to the right of the anchor with a 24pt gap.
+                //   2. If that runs off-screen, try to the left.
+                //   3. If still no room, drop BELOW the anchor (last resort).
+                // Vertically align to the anchor's top edge (plus a small
+                // offset) so the card reads as attached.
+                ForEach(Array(viewModel.spotlights.enumerated()), id: \.offset) { _, spot in
+                    if !spot.bullets.isEmpty {
+                        let cardWidth: CGFloat = 360
+                        let hue = Self.spotlightPalette[spot.hueIndex % Self.spotlightPalette.count]
+                        let pos = cardPosition(for: spot.anchor, cardWidth: cardWidth, screenW: screenW)
+                        summaryCard(
+                            bullets: spot.bullets,
+                            width: cardWidth,
+                            accent: hue,
+                            title: spot.title
+                        )
+                        .position(x: pos.x, y: pos.y)
+                    }
                 }
 
                 // Ghost clues — solution lines rendered at editor positions
@@ -352,14 +489,21 @@ struct OverlayView: View {
                     ghostClueLine(clue)
                 }
 
-                // Stage 1: Red boxes around detected question text (collecting phase)
-                ForEach(Array(viewModel.collectingBoxes.enumerated()), id: \.offset) { _, rect in
-                    Rectangle()
-                        .stroke(Color.red.opacity(0.7), lineWidth: 1.5)
-                        .background(Color.red.opacity(0.05))
-                        .cornerRadius(2)
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
+                // Stage 1: Red boxes around detected question text (collecting
+                // phase). Suppressed whenever spotlights are driving the view —
+                // the spotlight pattern already tells the viewer what the AI is
+                // reading; the noisy per-line OCR rectangles compete with that
+                // signal and light up irrelevant page chrome (site sidebars,
+                // tab bar) that isn't part of any spot's domain.
+                if viewModel.spotlights.isEmpty {
+                    ForEach(Array(viewModel.collectingBoxes.enumerated()), id: \.offset) { _, rect in
+                        Rectangle()
+                            .stroke(Color.red.opacity(0.7), lineWidth: 1.5)
+                            .background(Color.red.opacity(0.05))
+                            .cornerRadius(2)
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+                    }
                 }
 
                 // Red text boxes (code line tracking — legacy)
@@ -400,6 +544,30 @@ struct OverlayView: View {
         }
     }
 
+    /// Position a card BESIDE its anchor — never on top. Prefers the right
+    /// side, falls back to the left, and as a last resort drops below the
+    /// anchor. Ensures a 24pt gap from the anchor edge and clamps within
+    /// screen bounds. Returns the card's center point.
+    func cardPosition(for anchor: CGRect, cardWidth: CGFloat, screenW: CGFloat) -> CGPoint {
+        let cardGap: CGFloat = 24
+        let rightOfX = anchor.maxX + cardGap + cardWidth / 2
+        let leftOfX = anchor.minX - cardGap - cardWidth / 2
+        let placeRight = rightOfX + cardWidth / 2 <= screenW - 12
+        let placeLeft = !placeRight && leftOfX - cardWidth / 2 >= 12
+        NSLog("CardPos: screenW=%.0f anchor=%.0f,%.0f,%.0fx%.0f rightOfX=%.0f leftOfX=%.0f placeRight=%@ placeLeft=%@",
+              screenW, anchor.minX, anchor.minY, anchor.width, anchor.height,
+              rightOfX, leftOfX, placeRight ? "Y" : "N", placeLeft ? "Y" : "N")
+        if placeRight {
+            return CGPoint(x: rightOfX, y: anchor.minY + min(anchor.height * 0.5, 180))
+        }
+        if placeLeft {
+            return CGPoint(x: leftOfX, y: anchor.minY + min(anchor.height * 0.5, 180))
+        }
+        let clampedX = max(cardWidth / 2 + 12,
+                           min(anchor.midX, screenW - cardWidth / 2 - 12))
+        return CGPoint(x: clampedX, y: anchor.maxY + cardGap + 120)
+    }
+
     /// Estimated render height of the summary card — used for drawing the
     /// perspective corner-lines BEFORE the card lays out on screen.
     /// Matches the padding / spacing / bullet geometry of `summaryCard(bullets:width:)`.
@@ -418,15 +586,29 @@ struct OverlayView: View {
     private static let inkPrimary = Color(red: 22/255, green: 28/255, blue: 40/255)
     private static let inkMuted   = Color(red: 80/255, green: 95/255, blue: 115/255)
 
+    /// Hue palette for spotlight/card pairs — one hue per anchored region so
+    /// multiple spotlights can coexist on screen without the viewer losing
+    /// track of which card refers to which content area. Indexed by spot
+    /// position (first spot = navy, second = amber, etc.).
+    static let spotlightPalette: [Color] = [
+        Color(red:  29/255, green:  74/255, blue: 137/255),  // navy
+        Color(red: 178/255, green:  92/255, blue:  31/255),  // amber
+        Color(red: 118/255, green:  52/255, blue: 122/255),  // plum
+        Color(red:  52/255, green: 110/255, blue:  92/255),  // sage
+        Color(red:  44/255, green: 108/255, blue: 128/255),  // teal
+    ]
+
     @ViewBuilder
-    func summaryCard(bullets: [String], width: CGFloat) -> some View {
+    func summaryCard(bullets: [String], width: CGFloat,
+                     accent: Color? = nil, title: String? = nil) -> some View {
+        let hue = accent ?? Self.accentNavy
         VStack(alignment: .leading, spacing: 11) {
             // Header row
             HStack(spacing: 8) {
                 Image(systemName: "scope")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Self.accentNavy)
-                Text("Summary")
+                    .foregroundColor(hue)
+                Text(title ?? "Summary")
                     .font(.system(size: 13, weight: .semibold, design: .default))
                     .foregroundColor(Self.inkPrimary)
                 Spacer(minLength: 8)
@@ -436,13 +618,13 @@ struct OverlayView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
                     .background(
-                        Capsule().fill(Self.accentNavy.opacity(0.08))
+                        Capsule().fill(hue.opacity(0.08))
                     )
             }
 
             // Hairline divider
             Rectangle()
-                .fill(Self.accentNavy.opacity(0.14))
+                .fill(hue.opacity(0.14))
                 .frame(height: 1)
 
             // Bullet list
@@ -485,14 +667,14 @@ struct OverlayView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(
                     LinearGradient(
-                        colors: [Self.accentNavy.opacity(0.45), Self.accentNavy.opacity(0.20)],
+                        colors: [hue.opacity(0.45), hue.opacity(0.20)],
                         startPoint: .topLeading, endPoint: .bottomTrailing
                     ),
                     lineWidth: 1.2
                 )
         )
-        .shadow(color: Self.accentNavy.opacity(0.25), radius: 18, x: 0, y: 8)
-        .shadow(color: Color.black.opacity(0.10), radius: 4, x: 0, y: 2)
+        .shadow(color: hue.opacity(0.35), radius: 22, x: 0, y: 10)
+        .shadow(color: Color.black.opacity(0.12), radius: 5, x: 0, y: 2)
     }
 
     @ViewBuilder
