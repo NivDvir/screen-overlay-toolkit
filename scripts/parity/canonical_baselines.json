@@ -1,0 +1,40 @@
+{
+  "_comment": "Python mlx-vlm 0.4.3 reference output (temperature=0, deterministic) for each canonical test image. Generated 2026-04-25 with Qwen2.5-VL-7B-Instruct-4bit. The strict gate asserts Swift output is within 2px on every edge of every panel against these numbers. Refresh whenever mlx-vlm or model snapshot changes — and update the gate immediately.",
+  "model": "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
+  "snapshot_hash": "fdcc572e8b05ba9daeaf71be8c9e4267c826ff9b",
+  "mlx_vlm_version": "0.4.3",
+  "max_edge_delta_allowed": 2,
+  "prompt": "Detect these two UI panels and output their bbox_2d coordinates as a JSON array:\n1. \"question\" - the problem description panel on the left\n2. \"editor\" - the code editor panel on the right",
+  "images": [
+    {
+      "name": "leetcode_test",
+      "path": "_zero_px_test/leetcode_test.png",
+      "size_px": [3078, 2114],
+      "model_resize": [1260, 868],
+      "panels": {
+        "question": [1, 146, 421, 626],
+        "editor":   [421, 146, 881, 626]
+      }
+    },
+    {
+      "name": "leetcode_raw",
+      "path": "_zero_px_test/leetcode_raw.png",
+      "size_px": [3600, 2338],
+      "model_resize": [1260, 812],
+      "panels": {
+        "question": [24, 161, 352, 556],
+        "editor":   [364, 161, 749, 556]
+      }
+    },
+    {
+      "name": "native_vlm_input",
+      "path": "/tmp/native_vlm_input.png",
+      "size_px": [3600, 2338],
+      "model_resize": [1260, 812],
+      "panels": {
+        "question": [106, 24, 1091, 536],
+        "editor":   [16, 556, 464, 794]
+      }
+    }
+  ]
+}

@@ -56,3 +56,21 @@ Full root-cause investigation recorded in this document's prior revision (see gi
 3. ⏳ Once merged (or if maintainer requests smaller PRs, split the commit), repoint Package.swift back to upstream
 
 If the upstream maintainers decline, the fork is maintained indefinitely. `fix/qwen25vl-mrope` branch on the fork is always rebaseable onto newer `main` from upstream.
+
+## Incident 2026-04-25 — 10th MROPE bug, hidden by loose gate
+
+**What happened.** While preparing PR #222 split, a forensic re-measurement found Swift output drifting 9 px from the Python reference on the canonical LeetCode image — despite the published "≤2 px" parity claim. Root cause: `Qwen2VLMessageGenerator.generate(message:)` in `Libraries/MLXVLM/Models/Qwen2VL.swift` ordered content as `[text] + images`. HuggingFace's `apply_chat_template` for Qwen2.5-VL emits `<|vision_start|><|image_pad|><|vision_end|>{text}` (image first). The mismatched order shifted image-token positions, which shifted MROPE position-IDs for image patches, which shifted bbox output deterministically by +9/+8/+5 px on outer edges.
+
+**Why it stayed hidden.** The previous parity gate (`_zero_px_test/accuracy_gate.sh`, TOLERANCE=30 px) was 15× looser than the publication's "≤2 px" claim. Real measured 9 px parity passed the gate silently; the gate stopped serving as a check on the publication.
+
+**Fix.** Swap `Qwen2VLMessageGenerator` content order to `images + videos + [text]`. Result: bit-exact (0 px) on 2 of 3 canonical images, ≤2 px on the third — across all 8 edges of both panels.
+
+**Permanent prevention** (this commit):
+
+1. `patches/mlx-swift-lm-mrope-fixes.patch` now covers BOTH `Qwen25VL.swift` and `Qwen2VL.swift` (re-derived from production GhostOverlay's working tree). Previously only covered `Qwen25VL.swift` — the chat-template fix in `Qwen2VL.swift` was completely outside its scope.
+2. `scripts/parity/canonical_baselines.json` — saved Python mlx-vlm reference output (deterministic, temperature=0) for every canonical test image. The publication's "≤2 px" number now lives in code, not in prose.
+3. `scripts/parity/strict_2px_gate.py` — replaces the 30 px tolerance gate. Fails loudly if any edge of any panel exceeds 2 px against the saved reference.
+4. `scripts/parity/setup_and_verify.sh` — the only sanctioned way to bootstrap a parity-test clone. Fresh-clones upstream at the pinned commit, applies the patch, builds with xcodebuild, runs the strict gate. Aborts if anything fails.
+5. The setup script also greps the patched checkout for the literal `image-first` chat-template line and aborts before building if it's missing — so an incomplete patch can't sneak through to the build step.
+
+**Lesson.** The parity gate must enforce the number you publish. A gate that's looser than the claim is not a gate.

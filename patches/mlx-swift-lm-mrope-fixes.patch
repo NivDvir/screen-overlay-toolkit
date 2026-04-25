@@ -1,5 +1,5 @@
 diff --git a/Libraries/MLXVLM/Models/Qwen25VL.swift b/Libraries/MLXVLM/Models/Qwen25VL.swift
-index abd4912..e1a28d3 100644
+index abd4912..f673a1c 100644
 --- a/Libraries/MLXVLM/Models/Qwen25VL.swift
 +++ b/Libraries/MLXVLM/Models/Qwen25VL.swift
 @@ -1,5 +1,6 @@
@@ -263,7 +263,7 @@ index abd4912..e1a28d3 100644
              }
  
              // Apply patch merger
-@@ -678,41 +804,94 @@ public struct Qwen25VLProcessor: UserInputProcessor {
+@@ -678,40 +804,32 @@ public struct Qwen25VLProcessor: UserInputProcessor {
      func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
          image
              .toSRGB()
@@ -298,15 +298,16 @@ index abd4912..e1a28d3 100644
 -            .map {
 -                MediaProcessing.normalize(
 -                    $0, mean: config.imageMeanTuple, std: config.imageStdTuple)
-+        // Compute target size from ORIGINAL image (before any resize) to match Python's single-step resize
+-            }
+-            .map {
+-                MediaProcessing.asMLXArray($0)
+-            }
++        // Compute target size from the original image before any processing, matching Python's
++        // single-step resize: ratio = max_size / max(w,h); new_w = int(w*ratio)//28*28
 +        let origSize = images[0].extent.size
-+
-+        // If processing has a resize hint, use it to compute target dimensions matching Python
-+        // Python: ratio = max_size / max(w,h); new_w = int(w*ratio)//28*28; new_h = int(h*ratio)//28*28
-+        let factor = config.patchSize * config.mergeSize  // 28
++        let factor = config.patchSize * config.mergeSize
 +        let targetSize: CGSize
 +        if let resize = processing?.resize {
-+            // The resize hint gives the target dimensions directly (already computed as multiples of 28)
 +            targetSize = resize
 +        } else {
 +            let (h, w) = try QwenVL.targetSize(
@@ -314,77 +315,16 @@ index abd4912..e1a28d3 100644
 +                factor: factor, minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
 +            targetSize = CGSize(width: w, height: h)
 +        }
-+        let resizedSize = targetSize
-+        // Single-step resize from original to target (matching Python's single PIL resize)
 +
-+        // PIL resize via subprocess — exact pixel match with Python (~50ms)
-+        let tw = Int(resizedSize.width)
-+        let th = Int(resizedSize.height)
-+        let pngPath = "/tmp/native_vlm_input.png"
-+        let rawPath = "/tmp/vlm_resized_chw.raw"
-+        let helperPath = NSString(string: "~/dev/vlm_resize_helper.py").expandingTildeInPath
-+        let expectedBytes = 1 * 3 * th * tw * 4
-+
-+        if FileManager.default.fileExists(atPath: pngPath),
-+           FileManager.default.fileExists(atPath: helperPath) {
-+            let proc = Process()
-+            proc.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/python3")
-+            proc.arguments = [helperPath, pngPath, rawPath, String(tw), String(th)]
-+            try? proc.run()
-+            proc.waitUntilExit()
-+
-+            if let rawData = try? Data(contentsOf: URL(fileURLWithPath: rawPath)),
-+               rawData.count == expectedBytes {
-+                let array = MLXArray(rawData, [1, 3, th, tw], type: Float32.self)
-+                let processedImages = [array]
-+                return try QwenVL.patchify(
-+                    images: processedImages, mergeSize: config.mergeSize, patchSize: config.patchSize,
-+                    temporalPatchSize: config.temporalPatchSize)
-             }
--            .map {
--                MediaProcessing.asMLXArray($0)
-+        }
-+
-+        // Fallback: CGContext resize
-+        let srgbCS = CGColorSpace(name: CGColorSpace.sRGB)!
-+        let imageMean = config.imageMeanTuple
-+        let imageStd = config.imageStdTuple
-+
-+        let processedImages = images.map { ciImage -> MLXArray in
-+            guard let cgImg = ciImage.cgImage else { return MLXArray.zeros([1, 3, th, tw]) }
-+
-+            guard let ctx = CGContext(
-+                data: nil, width: tw, height: th,
-+                bitsPerComponent: 8, bytesPerRow: tw * 4,
-+                space: srgbCS,
-+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
-+            ) else { return MLXArray.zeros([1, 3, th, tw]) }
-+            ctx.interpolationQuality = .high
-+            ctx.draw(cgImg, in: CGRect(x: 0, y: 0, width: tw, height: th))
-+
-+            guard let pixels = ctx.data else { return MLXArray.zeros([1, 3, th, tw]) }
-+            let ptr = pixels.bindMemory(to: UInt8.self, capacity: tw * th * 4)
-+
-+            let count = tw * th
-+            var rCh = [Float](repeating: 0, count: count)
-+            var gCh = [Float](repeating: 0, count: count)
-+            var bCh = [Float](repeating: 0, count: count)
-+            let rm = Float(imageMean.0), gm = Float(imageMean.1), bm = Float(imageMean.2)
-+            let rs = Float(imageStd.0), gs = Float(imageStd.1), bs = Float(imageStd.2)
-+
-+            for i in 0..<count {
-+                rCh[i] = (Float(ptr[i*4]) / 255.0 - rm) / rs
-+                gCh[i] = (Float(ptr[i*4+1]) / 255.0 - gm) / gs
-+                bCh[i] = (Float(ptr[i*4+2]) / 255.0 - bm) / bs
-             }
++        let processedImages = images
++            .map { MediaProcessing.inSRGBToneCurveSpace($0) }
++            .map { MediaProcessing.resampleBicubic($0, to: targetSize) }
++            .map { MediaProcessing.normalize($0, mean: config.imageMeanTuple, std: config.imageStdTuple) }
++            .map { MediaProcessing.asMLXArray($0) }
  
-+            return MLXArray(rCh + gCh + bCh, [1, 3, th, tw])
-+        }
-+
          return try QwenVL.patchify(
              images: processedImages, mergeSize: config.mergeSize, patchSize: config.patchSize,
-             temporalPatchSize: config.temporalPatchSize)
-@@ -744,6 +923,8 @@ public struct Qwen25VLProcessor: UserInputProcessor {
+@@ -744,6 +862,8 @@ public struct Qwen25VLProcessor: UserInputProcessor {
                  promptTokens = try QwenVL.replacePaddingTokens(
                      in: promptTokens, frames: imageFrames, paddingToken: "<|image_pad|>",
                      mergeSize: config.mergeSize, tokenizer: tokenizer)
@@ -393,7 +333,7 @@ index abd4912..e1a28d3 100644
              }
          }
  
-@@ -828,24 +1009,55 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
+@@ -828,24 +948,55 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
          -> MLXArray
      {
          guard let pixelValues, let frames else {
@@ -451,7 +391,7 @@ index abd4912..e1a28d3 100644
      }
  
      public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
-@@ -880,6 +1092,163 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
+@@ -880,6 +1031,163 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
          return .logits(result)
      }
  
@@ -615,3 +555,35 @@ index abd4912..e1a28d3 100644
      public func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
          languageModel(inputs, cache: cache).logits
      }
+diff --git a/Libraries/MLXVLM/Models/Qwen2VL.swift b/Libraries/MLXVLM/Models/Qwen2VL.swift
+index 701f755..4d6e800 100644
+--- a/Libraries/MLXVLM/Models/Qwen2VL.swift
++++ b/Libraries/MLXVLM/Models/Qwen2VL.swift
+@@ -909,18 +909,17 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
+     public init() {}
+ 
+     public func generate(message: Chat.Message) -> MLXLMCommon.Message {
++        // Image content MUST come BEFORE text in the content array, matching
++        // HuggingFace's apply_chat_template output for Qwen2.5-VL which emits
++        // <|vision_start|><|image_pad|><|vision_end|>{text}. Putting text first
++        // shifts image-token positions and skews MROPE position IDs, producing
++        // a deterministic ~9 px bbox offset vs the Python mlx-vlm reference.
+         [
+             "role": message.role.rawValue,
+-            "content": [
+-                ["type": "text", "text": message.content]
+-            ]
+-                // Messages format for Qwen 2 VL, Qwen 2.5 VL. May need to be adapted for other models.
+-                + message.images.map { _ in
+-                    ["type": "image"]
+-                }
+-                + message.videos.map { _ in
+-                    ["type": "video"]
+-                },
++            "content":
++                message.images.map { _ in ["type": "image"] }
++                + message.videos.map { _ in ["type": "video"] }
++                + [["type": "text", "text": message.content]],
+         ]
+     }
+ }
