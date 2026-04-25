@@ -584,4 +584,84 @@ public class NativePanelDetector {
         return ScreenAnalysis(platform: "native_single", questionPanel: q, editorPanel: e,
                               solution: MockSolution(problemId: "native", keywords: [], lines: []))
     }
+
+    // MARK: - SDK API (free-form prompt, model-coordinate output)
+
+    /// Errors thrown by ``detect(from:prompt:)`` and the ``Grounder`` SDK facade.
+    public enum DetectionError: Error, LocalizedError {
+        /// ``loadModel()`` was not called or did not complete successfully.
+        case modelNotLoaded
+        /// The model returned no parseable bbox regions for the given prompt.
+        case noRegionsDetected
+
+        public var errorDescription: String? {
+            switch self {
+            case .modelNotLoaded:
+                return "Grounder model not loaded — call loadModel() before detect()."
+            case .noRegionsDetected:
+                return "Model returned no bounding-box regions for the given prompt."
+            }
+        }
+    }
+
+    /// Free-form VLM grounding inference. The prompt is passed verbatim to the
+    /// loaded model — typically Qwen2.5-VL or a derivative (UI-TARS). The same
+    /// image preprocessing pipeline as ``detectPanels(from:mode:)`` is applied;
+    /// both `bbox_2d` JSON-array and grounding-token response formats are parsed.
+    ///
+    /// - Parameters:
+    ///   - image: The image to ground regions in. Will be ICC-retagged to sRGB
+    ///     and resized to the model's patch grid (max 1280 px on the longest
+    ///     side, snapped to multiples of 28).
+    ///   - prompt: Natural-language instruction. Phrasing matters: ask for
+    ///     `bbox_2d` coordinates explicitly, name each region, and list them
+    ///     numerically for best results on Qwen2.5-VL.
+    /// - Returns: Bounding boxes in the model's resize coordinate space.
+    /// - Throws: ``DetectionError`` if the model isn't loaded or no regions
+    ///   could be parsed from the response.
+    public func detect(from image: CGImage, prompt: String) async throws -> [BoundingBox] {
+        guard let container = self.container else {
+            throw DetectionError.modelNotLoaded
+        }
+
+        // Same prep as detectPanels: ICC-retag to sRGB, wrap as CIImage,
+        // compute model-grid resize.
+        let srgbCS = CGColorSpace(name: CGColorSpace.sRGB)!
+        let srgbCG: CGImage
+        if let dp = image.dataProvider, let rawData = dp.data {
+            srgbCG = CGImage(
+                width: image.width, height: image.height,
+                bitsPerComponent: image.bitsPerComponent,
+                bitsPerPixel: image.bitsPerPixel,
+                bytesPerRow: image.bytesPerRow,
+                space: srgbCS,
+                bitmapInfo: image.bitmapInfo,
+                provider: CGDataProvider(data: rawData)!,
+                decode: nil, shouldInterpolate: true,
+                intent: .defaultIntent
+            ) ?? image
+        } else {
+            srgbCG = image
+        }
+        let ciImage = CIImage(cgImage: srgbCG)
+        let retinaScale = screenScaleFactor
+        let logicalW = CGFloat(image.width) / retinaScale
+        let logicalH = CGFloat(image.height) / retinaScale
+        let resize = vlmResize(w: logicalW, h: logicalH)
+
+        let raw = await runVLM(container, image: ciImage, prompt: prompt, resize: resize)
+        if raw.isEmpty {
+            throw DetectionError.noRegionsDetected
+        }
+        return raw.compactMap { entry -> BoundingBox? in
+            guard entry.bbox.count == 4 else { return nil }
+            return BoundingBox(
+                x1: Int(entry.bbox[0].rounded()),
+                y1: Int(entry.bbox[1].rounded()),
+                x2: Int(entry.bbox[2].rounded()),
+                y2: Int(entry.bbox[3].rounded()),
+                label: entry.label
+            )
+        }
+    }
 }

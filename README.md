@@ -80,6 +80,32 @@ GK_FORCE_READER=1 open GroundingKit.app
 
 Reader mode skips two-panel detection and treats the frontmost Chrome window as a single document panel. Intended for Wikipedia, arXiv, release notes, and long-form reading.
 
+### Use as a Swift library
+
+The grounding capability is exposed as a separate library target — you can `import GroundingKit` from any Swift Package without pulling in the menu-bar app shell:
+
+```swift
+// Package.swift
+.package(url: "https://github.com/NivDvir/screen-overlay-toolkit", branch: "main"),
+
+// Your code
+import GroundingKit
+import CoreGraphics
+
+let grounder = try await Grounder()
+let regions = try await grounder.ground(
+    image: cgImage,
+    prompt: """
+    Detect these two UI panels and output their bbox_2d coordinates as a JSON array:
+    1. "question" - the problem description panel on the left
+    2. "editor" - the code editor panel on the right
+    """
+)
+// regions: [BoundingBox(question: [1, 146, 421, 626]), BoundingBox(editor: [421, 146, 881, 626])]
+```
+
+`Grounder.ground(image:prompt:)` accepts free-form prompts. The model weights must be pre-downloaded to `~/.cache/huggingface/hub/`; set `GK_MODEL` to swap models (any Qwen2.5-VL-architecture derivative works — UI-TARS-1.5-7B is verified). Returned coordinates are in the model's resize space (max 1280 px on the longest side).
+
 ---
 
 ## Under the hood — native Swift Qwen2.5-VL
