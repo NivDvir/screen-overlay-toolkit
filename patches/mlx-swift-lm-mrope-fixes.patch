@@ -1,74 +1,438 @@
+diff --git a/Libraries/MLXVLM/MediaProcessing.swift b/Libraries/MLXVLM/MediaProcessing.swift
+index 4d69939..c93f7ed 100644
+--- a/Libraries/MLXVLM/MediaProcessing.swift
++++ b/Libraries/MLXVLM/MediaProcessing.swift
+@@ -74,27 +74,327 @@ public enum MediaProcessing {
+ 
+     /// Resample the image using Lanczos interpolation.
+     static public func resampleLanczos(_ image: CIImage, to size: CGSize) -> CIImage {
+-        // Create a bicubic scale filter
+-
+-        let yScale = size.height / image.extent.height
+-        let xScale = size.width / image.extent.width
++        // clampedToExtent replicates edge pixels, matching PIL's clamp boundary mode.
++        let extent = image.extent
++        let yScale = size.height / extent.height
++        let xScale = size.width / extent.width
+ 
+         let filter = CIFilter.lanczosScaleTransform()
+-        filter.inputImage = image
++        filter.inputImage = image.clampedToExtent()
+         filter.scale = Float(yScale)
+         filter.aspectRatio = Float(xScale / yScale)
+         let scaledImage = filter.outputImage!
+ 
+-        // Create a rect with the exact dimensions we want
+-        let exactRect = CGRect(
+-            x: 0,
+-            y: 0,
+-            width: size.width,
+-            height: size.height
+-        )
++        return scaledImage.cropped(to: CGRect(x: 0, y: 0, width: size.width, height: size.height))
++    }
+ 
+-        // Crop to ensure exact dimensions
+-        return scaledImage.cropped(to: exactRect)
++    /// PIL-matching Lanczos resampler, bit-identical to `PIL.Image.LANCZOS` (a=3,
++    /// separable, clamp boundary, int32 fixed-point with PRECISION_BITS=22).
++    ///
++    /// Apple's Lanczos family (Core Image / MPS / vImage) all share the same
++    /// underlying implementation that diverges from PIL on high-frequency
++    /// content — enough to shift VLM grounding bboxes by tens of pixels. This
++    /// function is a direct port of Pillow 10.4.0's `Resample.c` 8bpc fast path.
++    ///
++    /// Also bypasses Core Graphics' automatic ICC-profile conversion: macOS
++    /// screenshots are tagged Display P3, and ImageIO would otherwise convert
++    /// P3→sRGB on load, producing different uint8 bytes than `PIL.Image.open`
++    /// sees (which ignores the ICC tag). We retag without converting.
++    static public func resamplePILLanczos(_ image: CIImage, to size: CGSize) -> CIImage {
++        let tw = Int(size.width)
++        let th = Int(size.height)
++        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
++
++        // Read raw uint8 bytes WITHOUT ICC conversion. If the source CIImage
++        // was built from a CGImage with a tagged colorspace (Display P3, etc.),
++        // we retag as sRGB so CoreGraphics treats the bytes as already-sRGB.
++        let iw: Int
++        let ih: Int
++        var src: [UInt8]
++        if let cg = image.cgImage, let provider = cg.dataProvider {
++            iw = cg.width
++            ih = cg.height
++            let retagged = CGImage(
++                width: iw, height: ih,
++                bitsPerComponent: cg.bitsPerComponent,
++                bitsPerPixel: cg.bitsPerPixel,
++                bytesPerRow: cg.bytesPerRow,
++                space: srgb, bitmapInfo: cg.bitmapInfo,
++                provider: provider, decode: nil,
++                shouldInterpolate: false, intent: .defaultIntent) ?? cg
++            src = [UInt8](repeating: 0, count: ih * iw * 4)
++            let cgctx = CGContext(
++                data: &src, width: iw, height: ih,
++                bitsPerComponent: 8, bytesPerRow: iw * 4,
++                space: srgb,
++                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
++                          | CGBitmapInfo.byteOrder32Big.rawValue)!
++            cgctx.draw(retagged, in: CGRect(x: 0, y: 0, width: iw, height: ih))
++        } else {
++            iw = Int(image.extent.width)
++            ih = Int(image.extent.height)
++            src = [UInt8](repeating: 0, count: ih * iw * 4)
++            let cictx = CIContext(options: [.workingColorSpace: srgb])
++            cictx.render(image, toBitmap: &src, rowBytes: iw * 4,
++                         bounds: image.extent, format: CIFormat.RGBA8,
++                         colorSpace: srgb)
++        }
++
++        // --- Pillow 10.4.0 Resample.c port ---
++
++        let PRECISION_BITS: Int32 = 22
++        let ROUND_BIAS: Int32 = 1 << (PRECISION_BITS - 1)
++        let ONE = Double(Int32(1) << PRECISION_BITS)
++        let a = 3.0
++
++        @inline(__always) func sinc(_ x: Double) -> Double {
++            if x == 0 { return 1 }
++            let p = Double.pi * x
++            return Foundation.sin(p) / p
++        }
++        @inline(__always) func kernel(_ x: Double) -> Double {
++            if abs(x) >= a { return 0 }
++            return sinc(x) * sinc(x / a)
++        }
++        func precompute(_ inSize: Int, _ outSize: Int) -> ([Int], [Int], [[Int32]]) {
++            let scale = Double(inSize) / Double(outSize)
++            let fs = max(1.0, scale)
++            let support = a * fs
++            var lo = [Int](); var hi = [Int](); var qq = [[Int32]]()
++            lo.reserveCapacity(outSize); hi.reserveCapacity(outSize); qq.reserveCapacity(outSize)
++            for i in 0 ..< outSize {
++                let c = (Double(i) + 0.5) * scale
++                let l = max(Int(floor(c - support + 0.5)), 0)
++                let r = min(Int(floor(c + support + 0.5)), inSize)
++                var w = [Double](repeating: 0, count: r - l)
++                var sum = 0.0
++                for k in 0 ..< (r - l) {
++                    let x = (Double(l + k) + 0.5 - c) / fs
++                    let v = kernel(x); w[k] = v; sum += v
++                }
++                if sum != 0 { for k in 0 ..< w.count { w[k] /= sum } }
++                // Quantize to int32 with 22-bit precision. C's (int) truncates toward zero.
++                let q = w.map { weight -> Int32 in
++                    let s = weight * ONE
++                    let b = s < 0 ? -0.5 + s : 0.5 + s
++                    return Int32(b.rounded(.towardZero))
++                }
++                lo.append(l); hi.append(r); qq.append(q)
++            }
++            return (lo, hi, qq)
++        }
++
++        @inline(__always) func clip8(_ ss: Int32) -> UInt8 {
++            let s = ss >> PRECISION_BITS
++            if s < 0 { return 0 }
++            if s > 255 { return 255 }
++            return UInt8(s)
++        }
++
++        let (hlo, hhi, hw) = precompute(iw, tw)
++        let (vlo, vhi, vw) = precompute(ih, th)
++
++        // Horizontal pass: uint8 → uint8 at (ih, tw).
++        var horiz = [UInt8](repeating: 0, count: ih * tw * 4)
++        for y in 0 ..< ih {
++            for x in 0 ..< tw {
++                let l = hlo[x], r = hhi[x], w = hw[x]
++                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
++                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
++                for k in 0 ..< (r - l) {
++                    let p = y * iw * 4 + (l + k) * 4
++                    let kw = w[k]
++                    s0 &+= Int32(src[p + 0]) &* kw
++                    s1 &+= Int32(src[p + 1]) &* kw
++                    s2 &+= Int32(src[p + 2]) &* kw
++                    s3 &+= Int32(src[p + 3]) &* kw
++                }
++                let o = (y * tw + x) * 4
++                horiz[o + 0] = clip8(s0); horiz[o + 1] = clip8(s1)
++                horiz[o + 2] = clip8(s2); horiz[o + 3] = clip8(s3)
++            }
++        }
++
++        // Vertical pass: uint8 → uint8 at (tw, th).
++        var dst = [UInt8](repeating: 0, count: th * tw * 4)
++        for y in 0 ..< th {
++            let l = vlo[y], r = vhi[y], w = vw[y]
++            for x in 0 ..< tw {
++                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
++                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
++                for k in 0 ..< (r - l) {
++                    let p = ((l + k) * tw + x) * 4
++                    let kw = w[k]
++                    s0 &+= Int32(horiz[p + 0]) &* kw
++                    s1 &+= Int32(horiz[p + 1]) &* kw
++                    s2 &+= Int32(horiz[p + 2]) &* kw
++                    s3 &+= Int32(horiz[p + 3]) &* kw
++                }
++                let o = (y * tw + x) * 4
++                dst[o + 0] = clip8(s0); dst[o + 1] = clip8(s1)
++                dst[o + 2] = clip8(s2); dst[o + 3] = clip8(s3)
++            }
++        }
++
++        return CIImage(bitmapData: Data(dst), bytesPerRow: tw * 4,
++                       size: CGSize(width: tw, height: th),
++                       format: .RGBA8, colorSpace: srgb)
++    }
++
++    /// PIL-matching Lanczos that returns raw uint8 RGBA bytes (no CIImage
++    /// round-trip). Internal helper used by both `resamplePILLanczos` (which
++    /// re-wraps as CIImage) and `resamplePILLanczosToArray` (which normalizes
++    /// directly to MLXArray). Splitting this out avoids a round-trip through
++    /// CIImage that would re-encode the bytes via the working colorspace.
++    internal static func _pilLanczosCore(
++        _ image: CIImage, to size: CGSize
++    ) -> (bytes: [UInt8], tw: Int, th: Int) {
++        let tw = Int(size.width), th = Int(size.height)
++        let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
++
++        let iw: Int, ih: Int
++        var src: [UInt8]
++        if let cg = image.cgImage, let provider = cg.dataProvider {
++            iw = cg.width
++            ih = cg.height
++            let retagged = CGImage(
++                width: iw, height: ih,
++                bitsPerComponent: cg.bitsPerComponent,
++                bitsPerPixel: cg.bitsPerPixel,
++                bytesPerRow: cg.bytesPerRow,
++                space: srgb, bitmapInfo: cg.bitmapInfo,
++                provider: provider, decode: nil,
++                shouldInterpolate: false, intent: .defaultIntent) ?? cg
++            src = [UInt8](repeating: 0, count: ih * iw * 4)
++            let cgctx = CGContext(
++                data: &src, width: iw, height: ih,
++                bitsPerComponent: 8, bytesPerRow: iw * 4,
++                space: srgb,
++                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
++                          | CGBitmapInfo.byteOrder32Big.rawValue)!
++            cgctx.draw(retagged, in: CGRect(x: 0, y: 0, width: iw, height: ih))
++        } else {
++            iw = Int(image.extent.width)
++            ih = Int(image.extent.height)
++            src = [UInt8](repeating: 0, count: ih * iw * 4)
++            CIContext(options: [.workingColorSpace: srgb]).render(
++                image, toBitmap: &src, rowBytes: iw * 4,
++                bounds: image.extent, format: CIFormat.RGBA8, colorSpace: srgb)
++        }
++
++        // PIL Lanczos int32 fixed-point (Pillow 10.4.0 Resample.c port).
++        let PRECISION_BITS: Int32 = 22
++        let ROUND_BIAS: Int32 = 1 << (PRECISION_BITS - 1)
++        let ONE = Double(Int32(1) << PRECISION_BITS)
++        let a = 3.0
++        @inline(__always) func sinc(_ x: Double) -> Double {
++            if x == 0 { return 1 }
++            let p = Double.pi * x
++            return Foundation.sin(p) / p
++        }
++        @inline(__always) func kernel(_ x: Double) -> Double {
++            if abs(x) >= a { return 0 }
++            return sinc(x) * sinc(x / a)
++        }
++        func precompute(_ inSize: Int, _ outSize: Int) -> ([Int], [Int], [[Int32]]) {
++            let scale = Double(inSize) / Double(outSize)
++            let fs = max(1.0, scale)
++            let support = a * fs
++            var lo = [Int](); var hi = [Int](); var qq = [[Int32]]()
++            lo.reserveCapacity(outSize); hi.reserveCapacity(outSize); qq.reserveCapacity(outSize)
++            for i in 0 ..< outSize {
++                let c = (Double(i) + 0.5) * scale
++                let l = max(Int(floor(c - support + 0.5)), 0)
++                let r = min(Int(floor(c + support + 0.5)), inSize)
++                var w = [Double](repeating: 0, count: r - l)
++                var sum = 0.0
++                for k in 0 ..< (r - l) {
++                    let x = (Double(l + k) + 0.5 - c) / fs
++                    let v = kernel(x); w[k] = v; sum += v
++                }
++                if sum != 0 { for k in 0 ..< w.count { w[k] /= sum } }
++                let q = w.map { weight -> Int32 in
++                    let s = weight * ONE
++                    let b = s < 0 ? -0.5 + s : 0.5 + s
++                    return Int32(b.rounded(.towardZero))
++                }
++                lo.append(l); hi.append(r); qq.append(q)
++            }
++            return (lo, hi, qq)
++        }
++        @inline(__always) func clip8(_ ss: Int32) -> UInt8 {
++            let s = ss >> PRECISION_BITS
++            if s < 0 { return 0 }
++            if s > 255 { return 255 }
++            return UInt8(s)
++        }
++        let (hlo, hhi, hw) = precompute(iw, tw)
++        let (vlo, vhi, vw) = precompute(ih, th)
++
++        var horiz = [UInt8](repeating: 0, count: ih * tw * 4)
++        for y in 0 ..< ih {
++            for x in 0 ..< tw {
++                let l = hlo[x], r = hhi[x], w = hw[x]
++                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
++                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
++                for k in 0 ..< (r - l) {
++                    let p = y * iw * 4 + (l + k) * 4
++                    let kw = w[k]
++                    s0 &+= Int32(src[p + 0]) &* kw
++                    s1 &+= Int32(src[p + 1]) &* kw
++                    s2 &+= Int32(src[p + 2]) &* kw
++                    s3 &+= Int32(src[p + 3]) &* kw
++                }
++                let o = (y * tw + x) * 4
++                horiz[o + 0] = clip8(s0); horiz[o + 1] = clip8(s1)
++                horiz[o + 2] = clip8(s2); horiz[o + 3] = clip8(s3)
++            }
++        }
++        var dst = [UInt8](repeating: 0, count: th * tw * 4)
++        for y in 0 ..< th {
++            let l = vlo[y], r = vhi[y], w = vw[y]
++            for x in 0 ..< tw {
++                var s0: Int32 = ROUND_BIAS, s1: Int32 = ROUND_BIAS
++                var s2: Int32 = ROUND_BIAS, s3: Int32 = ROUND_BIAS
++                for k in 0 ..< (r - l) {
++                    let p = ((l + k) * tw + x) * 4
++                    let kw = w[k]
++                    s0 &+= Int32(horiz[p + 0]) &* kw
++                    s1 &+= Int32(horiz[p + 1]) &* kw
++                    s2 &+= Int32(horiz[p + 2]) &* kw
++                    s3 &+= Int32(horiz[p + 3]) &* kw
++                }
++                let o = (y * tw + x) * 4
++                dst[o + 0] = clip8(s0); dst[o + 1] = clip8(s1)
++                dst[o + 2] = clip8(s2); dst[o + 3] = clip8(s3)
++            }
++        }
++        return (dst, tw, th)
++    }
++
++    /// Full PIL-matching preprocess: raw CGImage → PIL Lanczos → normalize →
++    /// `[1, 3, H, W]` float32 MLXArray. Zero CIImage round-trip.
++    static public func resamplePILLanczosToArray(
++        _ image: CIImage, to size: CGSize,
++        mean: (CGFloat, CGFloat, CGFloat),
++        std: (CGFloat, CGFloat, CGFloat)
++    ) -> MLXArray {
++        let (u8, tw, th) = _pilLanczosCore(image, to: size)
++        let rm = Float(mean.0), gm = Float(mean.1), bm = Float(mean.2)
++        let rs = Float(std.0),  gs = Float(std.1),  bs = Float(std.2)
++        let inv255: Float = 1.0 / 255.0
++        let n = tw * th
++        var planar = [Float](repeating: 0, count: 3 * n)
++        for y in 0 ..< th {
++            for x in 0 ..< tw {
++                let p = (y * tw + x) * 4
++                let i = y * tw + x
++                planar[i]         = (Float(u8[p + 0]) * inv255 - rm) / rs
++                planar[i + n]     = (Float(u8[p + 1]) * inv255 - gm) / gs
++                planar[i + 2 * n] = (Float(u8[p + 2]) * inv255 - bm) / bs
++            }
++        }
++        return MLXArray(planar, [1, 3, th, tw])
+     }
+ 
+     /// Resample the image using bicubic interpolation.
+@@ -341,7 +641,7 @@ public enum MediaProcessing {
+     static public func asProcessedSequence(
+         _ video: UserInput.Video,
+         samplesPerSecond: Int,
+-        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 }
++        frameProcessing: (VideoFrame) throws -> VideoFrame = { $0 },
+     ) async throws -> ProcessedFrames {
+         return try await asProcessedSequence(
+             video,
 diff --git a/Libraries/MLXVLM/Models/Qwen25VL.swift b/Libraries/MLXVLM/Models/Qwen25VL.swift
-index abd4912..f673a1c 100644
+index abd4912..50ac2e6 100644
 --- a/Libraries/MLXVLM/Models/Qwen25VL.swift
 +++ b/Libraries/MLXVLM/Models/Qwen25VL.swift
-@@ -1,5 +1,6 @@
+@@ -1,4 +1,25 @@
  // Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_5_vl
++//
++// Qwen2.5-VL uses Multimodal RoPE (MROPE): a 3D position encoding where the
++// rotary dimensions are split across temporal / height / width axes, rather
++// than a single 1D sequence index. This requires two extensions to the usual
++// decoder plumbing:
++//
++//   1. `getRopeIndex` builds the 3D position IDs from the image-grid THW
++//      shape and the position of `<|image_pad|>` tokens in the prompt. It
++//      lives in Qwen25VLRopeIndex.swift.
++//
++//   2. During prefill, the language model stores `positionIds` and
++//      `ropeDeltas` from step 1. During subsequent decode steps, positions
++//      are reconstructed from `ropeDeltas + cacheOffset` — the KVCache
++//      protocol does not carry this state, so it lives on the language
++//      model itself.
++//
++// Attention.mropeCosSin applies the MROPE section selection per HuggingFace
++// `modeling_qwen2_5_vl.py`. The `InvFreqBox` wrapper hides the precomputed
++// inverse-frequency table from MLX's Module weight-loading reflection (same
++// effect as Qwen3VL / Qwen35 pulling their RotaryEmbedding into a
++// non-Module helper).
  
-+import Accelerate
  import CoreImage
  import Foundation
- import MLX
-@@ -43,7 +44,11 @@ private enum Language {
-         let kvHeads: Int
+@@ -44,6 +65,10 @@ private enum Language {
          let headDim: Int
          let scale: Float
--        let mropeSection: [Int]
-+        let mropeSection: [Int]      // cumulative section indices (for half-dim split)
-+        let mropeSectionRaw: [Int]   // raw section sizes [16, 24, 24] (for full-dim split)
-+        // Wrapped in a class to hide from Module's weight loading (not a trained weight)
+         let mropeSection: [Int]
++        let mropeSectionRaw: [Int]
++        // Box hides invFreq from Module's weight-loader reflection.
 +        private class InvFreqBox { let value: MLXArray; init(_ v: MLXArray) { value = v } }
 +        private let _invFreqBox: InvFreqBox
  
          @ModuleInfo(key: "q_proj") var wq: Linear
          @ModuleInfo(key: "k_proj") var wk: Linear
-@@ -65,6 +70,8 @@ private enum Language {
+@@ -65,10 +90,9 @@ private enum Language {
              self._wo.wrappedValue = Linear(heads * headDim, dim, bias: false)
  
              if let v = args.ropeScaling?["mrope_section"], let array = v.asInts() {
-+                // Raw sections e.g. [16, 24, 24] — used for splitting full-dim cos/sin
+-                // mrope_section = np.cumsum(mrope_section * 2)[:-1].tolist()
 +                self.mropeSectionRaw = array
-                 // mrope_section = np.cumsum(mrope_section * 2)[:-1].tolist()
                  self.mropeSection = sequence(state: (0, array.makeIterator())) { state in
                      if let v = state.1.next() {
-@@ -79,12 +86,54 @@ private enum Language {
+-                        // note the *2
+                         state.0 += v * 2
+                         return state.0
+                     } else {
+@@ -79,12 +103,43 @@ private enum Language {
                  fatalError("rope_scaling['mrope_section'] must be an array of integers")
              }
  
-+            // Compute inv_freq for MROPE (same formula as Python)
-+            // inv_freq = 1.0 / (theta ^ (arange(0, dim, 2) / dim))
 +            let freqIndices = MLXArray(stride(from: 0, to: headDim, by: 2)).asType(.float32)
-+            let base = MLXArray(args.ropeTheta)
-+            self._invFreqBox = InvFreqBox(1.0 / pow(base, freqIndices / Float(headDim)))
++            let base = MLXArray(args.ropeTheta).asType(.float32)
++            self._invFreqBox = InvFreqBox(1.0 / MLX.pow(base, freqIndices / Float(headDim)))
 +
              self._rotaryEmbedding.wrappedValue = RoPE(
                  dimensions: headDim, traditional: args.ropeTraditional, base: args.ropeTheta)
          }
  
-+        /// Compute cos/sin for MROPE from 3D position IDs
-+        /// Matches Python apply_mrope: start with temporal, overwrite H/W ranges
 +        private func mropeCosSin(positionIds: MLXArray) -> (MLXArray, MLXArray) {
-+            // positionIds: [3, batch, seq]
-+            let invFreqExpanded = _invFreqBox.value.reshaped(1, 1, -1, 1)  // [1, 1, dim/2, 1]
-+            let posExpanded = positionIds[0..., 0..., .newAxis, 0...].asType(.float32)  // [3, batch, 1, seq]
-+            var freqs = matmul(invFreqExpanded, posExpanded)  // [3, batch, dim/2, seq]
-+            freqs = freqs.transposed(0, 1, 3, 2)  // [3, batch, seq, dim/2]
++            let invFreqExpanded = _invFreqBox.value.reshaped(1, 1, -1, 1)
++            let posExpanded = positionIds[0..., 0..., .newAxis, 0...].asType(.float32)
++            var freqs = matmul(invFreqExpanded, posExpanded)
++            freqs = freqs.transposed(0, 1, 3, 2)
 +
-+            // Python apply_mrope: start with temporal (freqs[0]), overwrite H/W slices
-+            // mropeSectionRaw = [16, 24, 24]
-+            // dims 0..15 → temporal, dims 16..39 → height, dims 40..63 → width
-+            var result = freqs[0]  // [batch, seq, dim/2] — start with temporal
-+            var offset = mropeSectionRaw[0]  // 16
++            var result = freqs[0]
++            var offset = mropeSectionRaw[0]
 +            for dim in 1 ..< mropeSectionRaw.count {
 +                let length = mropeSectionRaw[dim]
-+                // Replace slice [offset..<offset+length] with freqs from this dimension
-+                let dimFreqs = freqs[dim]  // [batch, seq, dim/2]
-+                // Use scatter or manual slice replacement
++                let dimFreqs = freqs[dim]
 +                let before = result[0..., 0..., 0 ..< offset]
 +                let middle = dimFreqs[0..., 0..., offset ..< (offset + length)]
-+                let after: MLXArray
 +                if offset + length < result.dim(-1) {
-+                    after = result[0..., 0..., (offset + length)...]
++                    let after = result[0..., 0..., (offset + length)...]
 +                    result = concatenated([before, middle, after], axis: -1)
 +                } else {
 +                    result = concatenated([before, middle], axis: -1)
@@ -76,7 +440,7 @@ index abd4912..f673a1c 100644
 +                offset += length
 +            }
 +
-+            let emb = concatenated([result, result], axis: -1)  // [batch, seq, dim]
++            let emb = concatenated([result, result], axis: -1)
 +            return (MLX.cos(emb), MLX.sin(emb))
 +        }
 +
@@ -87,7 +451,12 @@ index abd4912..f673a1c 100644
          ) -> MLXArray {
              let (B, L) = (x.dim(0), x.dim(1))
  
-@@ -97,10 +146,22 @@ private enum Language {
+@@ -92,15 +147,21 @@ private enum Language {
+             var keys = wk(x)
+             var values = wv(x)
+ 
+-            // prepare the queries, keys and values for the attention computation
+             queries = queries.reshaped(B, L, heads, headDim).transposed(0, 2, 1, 3)
              keys = keys.reshaped(B, L, kvHeads, headDim).transposed(0, 2, 1, 3)
              values = values.reshaped(B, L, kvHeads, headDim).transposed(0, 2, 1, 3)
  
@@ -96,17 +465,12 @@ index abd4912..f673a1c 100644
 -            queries = rotaryEmbedding(queries, offset: offset)
 -            keys = rotaryEmbedding(keys, offset: offset)
 +            if let positionIds {
-+                // MROPE path: compute 3D-aware cos/sin from position IDs
 +                let (cosValues, sinValues) = mropeCosSin(positionIds: positionIds)
-+                // Apply rotary embedding: expand dims for head broadcasting
-+                let cos = cosValues[.newAxis, 0..., 0..., 0...]  // [1, batch, seq, dim]
++                let cos = cosValues[.newAxis, 0..., 0..., 0...]
 +                let sin = sinValues[.newAxis, 0..., 0..., 0...]
-+                let qEmbed = (queries * cos) + (QwenVL.rotateHalf(queries) * sin)
-+                let kEmbed = (keys * cos) + (QwenVL.rotateHalf(keys) * sin)
-+                queries = qEmbed
-+                keys = kEmbed
++                queries = (queries * cos) + (QwenVL.rotateHalf(queries) * sin)
++                keys = (keys * cos) + (QwenVL.rotateHalf(keys) * sin)
 +            } else {
-+                // Simple sequential RoPE for autoregressive generation
 +                let offset = cache?.offset ?? 0
 +                queries = rotaryEmbedding(queries, offset: offset)
 +                keys = rotaryEmbedding(keys, offset: offset)
@@ -150,14 +514,14 @@ index abd4912..f673a1c 100644
  
          var kvHeads: [Int]
  
-+        // MROPE state: stored position IDs from prefill, reused during autoregressive generation
++        // MROPE prefill state, consumed on the next decode call.
 +        var _positionIds: MLXArray?
 +        var _ropeDeltas: MLXArray?
 +
          public init(_ args: Qwen25VLConfiguration.TextConfiguration) {
              self.model = Qwen25Model(args)
  
-@@ -220,9 +287,40 @@ private enum Language {
+@@ -220,9 +287,35 @@ private enum Language {
          }
  
          public func callAsFunction(
@@ -167,49 +531,43 @@ index abd4912..f673a1c 100644
          ) -> LMOutput {
 -            var out = model(inputs, cache: cache, inputEmbedding: inputEmbedding)
 +            var effectivePositionIds = positionIds ?? _positionIds
-+
-+            // Clear stored position IDs after first use (prefill done)
 +            if _positionIds != nil { _positionIds = nil }
 +
-+            // During autoregressive generation after multimodal prefill:
-+            // compute position IDs using rope_deltas so MROPE offsets are correct
-+            if effectivePositionIds == nil, let ropeDeltas = _ropeDeltas, let cache {
-+                let input = inputs ?? inputEmbedding!
++            if effectivePositionIds == nil, let ropeDeltas = _ropeDeltas, let cache,
++                let input = inputs ?? inputEmbedding
++            {
 +                let batch = input.dim(0)
 +                let seqLength = input.dim(1)
 +                let lastCacheOffset = cache.last?.offset ?? 0
 +
 +                var delta = MLXArray(lastCacheOffset).asType(.int32) + ropeDeltas.asType(.int32)
-+
-+                var base = MLXArray(0 ..< seqLength).asType(.int32)
-+                base = base[.newAxis, 0...]
-+                base = broadcast(base, to: [batch, seqLength])
-+
 +                if delta.dim(0) == 1 && batch > 1 {
 +                    delta = repeated(delta, count: batch, axis: 0)
 +                }
 +
-+                base = base + delta
++                var base = MLXArray(0 ..< seqLength).asType(.int32)
++                base = base[.newAxis, 0...]
++                base = broadcast(base, to: [batch, seqLength]) + delta
 +
-+                effectivePositionIds = base[.newAxis, 0..., 0...]
-+                effectivePositionIds = broadcast(effectivePositionIds!, to: [3, batch, seqLength])
++                effectivePositionIds = broadcast(
++                    base[.newAxis, 0..., 0...], to: [3, batch, seqLength])
 +            }
 +
-+            var out = model(inputs, cache: cache, inputEmbedding: inputEmbedding,
-+                           positionIds: effectivePositionIds)
++            var out = model(
++                inputs, cache: cache, inputEmbedding: inputEmbedding,
++                positionIds: effectivePositionIds)
              if let lmHead {
                  out = lmHead(out)
              } else {
-@@ -316,12 +414,19 @@ private enum Vision {
+@@ -316,12 +409,18 @@ private enum Vision {
              k = k.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
              v = v.reshaped(1, sequenceLength, numHeads, -1).transposed(0, 2, 1, 3)
  
-+            // Apply attention mask (window or full attention)
-+            // attentionMask is [1, seqLen, seqLen] boolean — convert to float16 mask for SDPA
-+            let boolMask = attentionMask[.newAxis, 0..., 0..., 0...]  // [1, 1, seqLen, seqLen]
-+            let floatMask = MLX.where(boolMask,
-+                                       MLXArray(Float16(0)),
-+                                       MLXArray(Float16(-10000)))
++            let boolMask = attentionMask[.newAxis, 0..., 0..., 0...]
++            let floatMask = MLX.where(
++                boolMask,
++                MLXArray(Float(0), dtype: .float16),
++                MLXArray(Float(-10000), dtype: .float16))
 +
              let output = MLXFast.scaledDotProductAttention(
                  queries: q,
@@ -221,49 +579,7 @@ index abd4912..f673a1c 100644
              )
              .transposed(0, 2, 1, 3)
              .reshaped(sequenceLength, -1)
-@@ -568,6 +673,15 @@ private enum Vision {
-             var hiddenStates = patchEmbed(hiddenStates)
-             let rotaryPosEmb = rotaryPositionEmbedding(frames)
- 
-+            // DIAG: compare with Python
-+            NSLog("DIAG: patchEmbed output shape=%@ first5=%@",
-+                  hiddenStates.shape.description,
-+                  hiddenStates[0, 0..<min(5, hiddenStates.dim(1))].asArray(Float.self).map{String(format:"%.4f",$0)}.joined(separator: ","))
-+            NSLog("DIAG: rotPosEmb shape=%@ [0,:5]=%@ mean=%.4f",
-+                  rotaryPosEmb.shape.description,
-+                  rotaryPosEmb[0, 0..<min(5, rotaryPosEmb.dim(1))].asArray(Float.self).map{String(format:"%.4f",$0)}.joined(separator: ","),
-+                  rotaryPosEmb.mean().item(Float.self))
-+
-             // Get window indices and sequence lengths
-             let (windowIndex, cuWindowSeqlens) = getWindowIndex(frames)
- 
-@@ -587,6 +701,13 @@ private enum Vision {
-             let windowAttentionMask = attentionMask(
-                 sequenceLength: seqLen, cuSeqlens: cuWindowSeqlens)
- 
-+            // DIAG
-+            let wi5 = windowIndex[0..<min(5, windowIndex.dim(0))].asArray(Int32.self)
-+            NSLog("DIAG: windowIndex shape=%@ first5=%@", windowIndex.shape.description, wi5.map{String($0)}.joined(separator: ","))
-+            let cws = cuWindowSeqlens.asArray(Int32.self)
-+            NSLog("DIAG: cuWindowSeqlens count=%d first10=%@", cws.count, cws.prefix(10).map{String($0)}.joined(separator: ","))
-+            NSLog("DIAG: cuSeqlens=%@", cuSeqlens.map{String($0)}.joined(separator: ","))
-+
-             // Reshape and reindex hidden states
-             hiddenStates = hiddenStates.reshaped(seqLen / spatialMergeUnit, spatialMergeUnit, -1)
-             hiddenStates = hiddenStates[windowIndex, 0..., 0...]
-@@ -609,6 +730,11 @@ private enum Vision {
-                     attentionMask: attentionMask,
-                     rotaryPositionEmbedding: rotaryPosEmbReshaped
-                 )
-+                // DIAG: log first 3 blocks output
-+                if i < 3 {
-+                    let v5 = hiddenStates[0, 0..<5].asArray(Float.self)
-+                    NSLog("DIAG: block%d out[0,:5]=%@", i, v5.map{String(format:"%.4f",$0)}.joined(separator: ","))
-+                }
-             }
- 
-             // Apply patch merger
-@@ -678,40 +804,32 @@ public struct Qwen25VLProcessor: UserInputProcessor {
+@@ -678,40 +777,32 @@ public struct Qwen25VLProcessor: UserInputProcessor {
      func preprocess(image: CIImage, resizedSize: CGSize) -> CIImage {
          image
              .toSRGB()
@@ -284,8 +600,16 @@ index abd4912..f673a1c 100644
 -            height: Int(size.height), width: Int(size.width),
 -            factor: config.patchSize * config.mergeSize,
 -            minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
--        let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
--
++        // Cap longest side at 1280 and snap to multiples of (patchSize *
++        // mergeSize), matching mlx-vlm's default min_pixels / max_pixels.
++        let orig = images[0].extent.size
++        let factor = config.patchSize * config.mergeSize
++        let maxLong: CGFloat = 1280.0
++        let ratio = min(maxLong / max(orig.width, orig.height), 1.0)
++        let resizedWidth = max(Int(orig.width * ratio) / factor * factor, factor)
++        let resizedHeight = max(Int(orig.height * ratio) / factor * factor, factor)
+         let resizedSize = CGSize(width: resizedWidth, height: resizedHeight)
+ 
 -        // Process images
 -        let processedImages =
 -            images
@@ -302,85 +626,60 @@ index abd4912..f673a1c 100644
 -            .map {
 -                MediaProcessing.asMLXArray($0)
 -            }
-+        // Compute target size from the original image before any processing, matching Python's
-+        // single-step resize: ratio = max_size / max(w,h); new_w = int(w*ratio)//28*28
-+        let origSize = images[0].extent.size
-+        let factor = config.patchSize * config.mergeSize
-+        let targetSize: CGSize
-+        if let resize = processing?.resize {
-+            targetSize = resize
-+        } else {
-+            let (h, w) = try QwenVL.targetSize(
-+                height: Int(origSize.height), width: Int(origSize.width),
-+                factor: factor, minPixels: config.size.minPixels, maxPixels: config.size.maxPixels)
-+            targetSize = CGSize(width: w, height: h)
++        // PIL-matching preprocess: raw PNG bytes (no ICC conv) → PIL Lanczos →
++        // normalize → [1, 3, H, W] MLXArray. Bypasses the CIImage downstream
++        // chain entirely, which otherwise introduces gamma-encoding drift that
++        // shifts VLM bbox coordinates away from the Python reference.
++        let processedImages = images.map {
++            MediaProcessing.resamplePILLanczosToArray(
++                $0, to: resizedSize,
++                mean: config.imageMeanTuple, std: config.imageStdTuple)
 +        }
-+
-+        let processedImages = images
-+            .map { MediaProcessing.inSRGBToneCurveSpace($0) }
-+            .map { MediaProcessing.resampleBicubic($0, to: targetSize) }
-+            .map { MediaProcessing.normalize($0, mean: config.imageMeanTuple, std: config.imageStdTuple) }
-+            .map { MediaProcessing.asMLXArray($0) }
  
          return try QwenVL.patchify(
              images: processedImages, mergeSize: config.mergeSize, patchSize: config.patchSize,
-@@ -744,6 +862,8 @@ public struct Qwen25VLProcessor: UserInputProcessor {
-                 promptTokens = try QwenVL.replacePaddingTokens(
-                     in: promptTokens, frames: imageFrames, paddingToken: "<|image_pad|>",
-                     mergeSize: config.mergeSize, tokenizer: tokenizer)
-+                NSLog("MROPE: %d tokens, frames=%@", promptTokens.count,
-+                      imageFrames.map { "(\($0.t),\($0.h),\($0.w))" }.joined(separator: ","))
-             }
-         }
+@@ -792,6 +883,7 @@ public struct Qwen25VLProcessor: UserInputProcessor {
  
-@@ -828,24 +948,55 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
+         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
+         let mask = ones(like: promptArray).asType(.int8)
++
+         return LMInput(
+             text: .init(tokens: promptArray, mask: mask),
+             image: processedImage,
+@@ -827,25 +919,38 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
+     private func inputEmbeddings(inputIds: MLXArray, pixelValues: MLXArray?, frames: [THW]?)
          -> MLXArray
      {
-         guard let pixelValues, let frames else {
-+            // Text-only: reset MROPE state
-+            languageModel._positionIds = nil
-+            languageModel._ropeDeltas = nil
-             return languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis])
-         }
- 
-+        // Reset MROPE state when processing new image (matches Python)
 +        languageModel._positionIds = nil
 +        languageModel._ropeDeltas = nil
 +
-         // Get the input embeddings from the language model
-         let inputEmbeds = languageModel.model.embedTokens(inputIds)
+         guard let pixelValues, let frames else {
+             return languageModel.model.embedTokens(inputIds[.newAxis, .ellipsis])
+         }
  
+-        // Get the input embeddings from the language model
+         let inputEmbeds = languageModel.model.embedTokens(inputIds)
+-
 -        // Get the ouptut hidden states from the vision model
-+        // Get the output hidden states from the vision model
          var hiddenStates = self.visionModel(pixelValues, frames: frames)
  
          if hiddenStates.ndim == 2 {
              hiddenStates = hiddenStates[.newAxis, 0..., 0...]
          }
  
-+        // DIAG: compare vision encoder output with Python
-+        let vh10 = hiddenStates.ndim == 3
-+            ? hiddenStates[0, 0, 0..<min(10, hiddenStates.dim(2))].asArray(Float.self)
-+            : hiddenStates[0, 0..<min(10, hiddenStates.dim(1))].asArray(Float.self)
-+        NSLog("DIAG: vision[0,:10]=%@", vh10.map{String(format:"%.4f",$0)}.joined(separator: ","))
-+        let vmean = hiddenStates.mean().item(Float.self)
-+        NSLog("DIAG: vision mean=%.6f", vmean)
-+
-         // Insert special image tokens in the input_ids
+-        // Insert special image tokens in the input_ids
 -        return QwenVL.mergeInputIdsWithImageFeatures(
 +        let mergedEmbeds = QwenVL.mergeInputIdsWithImageFeatures(
              inputIds: inputIds, inputEmbeds: inputEmbeds, imageFeatures: hiddenStates,
              imageTokenId: config.baseConfiguration.imageTokenId,
              videoTokenId: config.baseConfiguration.videoTokenId)
 +
-+        // Compute MROPE 3D position IDs for spatial awareness
-+        let spatialMergeSize = config.visionConfiguration.spatialMergeSize
 +        let inputIds2D = inputIds.ndim == 1 ? inputIds[.newAxis, 0...] : inputIds
 +        let (positionIds, ropeDeltas) = Qwen25VL.getRopeIndex(
 +            inputIds: inputIds2D,
 +            imageGridTHW: frames,
 +            videoGridTHW: nil,
-+            spatialMergeSize: spatialMergeSize,
++            spatialMergeSize: config.visionConfiguration.spatialMergeSize,
 +            imageTokenId: config.baseConfiguration.imageTokenId,
 +            videoTokenId: config.baseConfiguration.videoTokenId,
 +            visionStartTokenId: config.baseConfiguration.visionStartTokenId)
@@ -391,12 +690,21 @@ index abd4912..f673a1c 100644
      }
  
      public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
-@@ -880,6 +1031,163 @@ public class Qwen25VL: Module, VLMModel, KVCacheDimensionProvider {
-         return .logits(result)
-     }
- 
-+    /// Compute MROPE 3D position IDs for image/video spatial encoding
-+    /// Ported from Qwen3VL.swift getRopeIndex() and Python get_rope_index()
+diff --git a/Libraries/MLXVLM/Models/Qwen25VLRopeIndex.swift b/Libraries/MLXVLM/Models/Qwen25VLRopeIndex.swift
+new file mode 100644
+index 0000000..30c4794
+--- /dev/null
++++ b/Libraries/MLXVLM/Models/Qwen25VLRopeIndex.swift
+@@ -0,0 +1,164 @@
++// Port of https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/qwen2_5_vl
++
++import Foundation
++import MLX
++import MLXLMCommon
++
++extension Qwen25VL {
++
++    /// Port of Qwen2_5_VLForConditionalGeneration.get_rope_index from HuggingFace transformers.
 +    static func getRopeIndex(
 +        inputIds: MLXArray,
 +        imageGridTHW: [THW]?,
@@ -551,23 +859,19 @@ index abd4912..f673a1c 100644
 +        }
 +        return (positionIds, deltas)
 +    }
-+
-     public func callAsFunction(_ inputs: MLXArray, cache: [any KVCache]?) -> MLXArray {
-         languageModel(inputs, cache: cache).logits
-     }
++}
 diff --git a/Libraries/MLXVLM/Models/Qwen2VL.swift b/Libraries/MLXVLM/Models/Qwen2VL.swift
-index 701f755..4d6e800 100644
+index 701f755..b55d0f1 100644
 --- a/Libraries/MLXVLM/Models/Qwen2VL.swift
 +++ b/Libraries/MLXVLM/Models/Qwen2VL.swift
-@@ -909,18 +909,17 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
+@@ -909,18 +909,16 @@ public struct Qwen2VLMessageGenerator: MessageGenerator {
      public init() {}
  
      public func generate(message: Chat.Message) -> MLXLMCommon.Message {
-+        // Image content MUST come BEFORE text in the content array, matching
-+        // HuggingFace's apply_chat_template output for Qwen2.5-VL which emits
-+        // <|vision_start|><|image_pad|><|vision_end|>{text}. Putting text first
-+        // shifts image-token positions and skews MROPE position IDs, producing
-+        // a deterministic ~9 px bbox offset vs the Python mlx-vlm reference.
++        // PARITY FIX: image content MUST come BEFORE text in the content array,
++        // matching HuggingFace's apply_chat_template output for Qwen2.5-VL which
++        // emits <|vision_start|><|image_pad|><|vision_end|>{text}. Putting text
++        // first shifts image-token positions and skews MROPE position IDs.
          [
              "role": message.role.rawValue,
 -            "content": [

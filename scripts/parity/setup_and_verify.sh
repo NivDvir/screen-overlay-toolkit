@@ -16,7 +16,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PARITY_DIR="$REPO_ROOT/scripts/parity"
 PATCH_FILE="$REPO_ROOT/patches/mlx-swift-lm-mrope-fixes.patch"
-PINNED_COMMIT="8c9dd6391139242261bcf27d253c326f9cf2d567"
+PINNED_COMMIT="7e2b7107"
 UPSTREAM_URL="https://github.com/ml-explore/mlx-swift-lm.git"
 
 WORKDIR="${PARITY_WORKDIR:-/tmp/parity-harness}"
