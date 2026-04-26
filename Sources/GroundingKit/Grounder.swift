@@ -17,11 +17,17 @@ import CoreGraphics
 /// minimal async API: load a model once, then call ``ground(image:prompt:)``
 /// with arbitrary natural-language prompts to get bounding-box coordinates.
 ///
+/// Marked `@unchecked Sendable` — Grounder's only public methods are async
+/// throws, and underlying MLX inference serializes naturally. Callers that
+/// need concurrent grounding requests should still wrap a single Grounder
+/// instance in their own actor; this conformance just lets it cross
+/// isolation boundaries (e.g. into an MCP-server actor).
+///
 /// The underlying model and patched mlx-swift-lm dependency are documented in
 /// the repo README. To use a different model that shares Qwen2.5-VL's
 /// architecture (e.g. UI-TARS-1.5-7B), set the `GK_MODEL` environment
 /// variable to its `mlx-community/...` slug before constructing the Grounder.
-public final class Grounder {
+public final class Grounder: @unchecked Sendable {
     private let detector: NativePanelDetector
 
     /// Loads the underlying VLM. The model weights must be pre-downloaded to
