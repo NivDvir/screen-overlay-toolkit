@@ -15,3 +15,8 @@ AppIcon.iconset/
 # Claude Code project memory — local only, never commit
 CLAUDE.md
 .claude/
+
+# Cross-adapter parity gate build artifacts
+scripts/parity/cross_adapter/.out/
+scripts/parity/cross_adapter/Package.resolved
+_zero_px_test
